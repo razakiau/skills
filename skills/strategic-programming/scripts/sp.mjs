@@ -1,7 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = new Set('ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte'.split(' '));
@@ -506,7 +507,59 @@ function buildReport(paths, tree = codeSnapshot(paths)) {
 }
 
 const JSCPD = 'jscpd@5.4.1';
-const DUP_TIMEOUT = 120_000;
+const DUP_TIMEOUT = Number(process.env.SP_DUP_TIMEOUT_MS) > 0 ? Number(process.env.SP_DUP_TIMEOUT_MS) : 120_000;
+
+// `--baseline-from-ref` checks the base out as a worktree in <tmpdir>/cpd-base-ref-*; a killed
+// jscpd leaves it registered. Only those go, never another worktree.
+function removeBaseWorktrees(top) {
+  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const prefixes = [join(tmpdir(), 'cpd-base-ref-'), join(real(tmpdir()), 'cpd-base-ref-')];
+  const list = tryGit(['worktree', 'list', '--porcelain'], { cwd: top }) ?? '';
+  for (const line of list.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const path = line.slice('worktree '.length);
+    if (![path, real(path)].some((p) => prefixes.some((pre) => p.startsWith(pre)))) continue;
+    tryGit(['worktree', 'remove', '--force', path], { cwd: top });
+  }
+  tryGit(['worktree', 'prune'], { cwd: top });
+}
+
+// Run dirs of audits that were killed: their process is gone (or the pre-pid `dup`).
+function pruneDupDirs(state) {
+  for (const f of readdirSync(state)) {
+    const m = f.match(/^dup(?:\.(\d+))?$/);
+    if (m && !(m[1] && alive(Number(m[1])))) rmSync(join(state, f), { recursive: true, force: true });
+  }
+}
+
+// Runs jscpd from <run>: npm takes the nearest package.json as the project and reads that
+// project's .npmrc, so <run> gets an empty one of its own (the state dir sits inside the repo).
+// `--config` with `{}` keeps the repo's .jscpd.json / package.json `jscpd` key out. jscpd runs in
+// its own process group so a timeout kills npx, node and jscpd alike.
+function runJscpd(top, run, base) {
+  writeFileSync(join(run, 'package.json'), '{}\n');
+  writeFileSync(join(run, 'jscpd.json'), '{}\n');
+  const exts = [...CODE_EXT].join(',');
+  const args = ['-y', JSCPD, '--config', join(run, 'jscpd.json'), '--baseline-from-ref', base,
+    '--pattern', `**/*.{${exts}}`, '--ignore', '**/node_modules/**,**/.git/**',
+    '-r', 'json', '-o', run, '--report-name', 'report', '-s', '--no-tips', top];
+  const r = spawnSync('npx', args, {
+    cwd: run, stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: DUP_TIMEOUT,
+    killSignal: 'SIGKILL', detached: true, maxBuffer: 1 << 26, env: { ...process.env, JSCPD_NO_TIPS: '1' },
+  });
+  if (r.error?.code === 'ENOENT') return 'npx not found';
+  if (r.error?.code === 'ETIMEDOUT' || r.signal) {
+    // spawnSync killed npx only; its children (node, the jscpd binary) share its group.
+    if (r.pid) { try { process.kill(-r.pid, 'SIGKILL'); } catch { /* group already gone */ } }
+    return `jscpd timed out after ${DUP_TIMEOUT / 1000} s`;
+  }
+  if (r.error) return `jscpd failed: ${String(r.error.message).split('\n')[0].slice(0, 160)}`;
+  if (r.status !== 0) {
+    const msg = String(r.stderr ?? '').split('\n').find((l) => l.trim()) ?? `exit ${r.status}`;
+    return `jscpd failed: ${msg.trim().slice(0, 160)}`;
+  }
+  return null;
+}
 
 // New duplicate blocks touching a changed (A/M/R) non-test code file, from jscpd's own baseline:
 // `--baseline-from-ref <base>` scans the base's tree with the same options and marks each clone of
@@ -522,22 +575,33 @@ function readDuplicates({ top, state }, report) {
   if (tryGit(['cat-file', '-t', base], { cwd: top }) === 'tree') {
     base = git(['commit-tree', base, '-m', 'strategic-programming dup base'], { cwd: top }).trim();
   }
-  const out = join(state, 'dup');
-  rmSync(out, { recursive: true, force: true });
-  const exts = [...CODE_EXT].join(',');
-  const args = ['-y', JSCPD, '--baseline-from-ref', base, '--pattern', `**/*.{${exts}}`,
-    '--ignore', '**/node_modules/**,**/.git/**', '-r', 'json', '-o', out, '--report-name', 'report', '-s', '--no-tips', '.'];
+  pruneDupDirs(state);
+  const run = join(state, `dup.${process.pid}`);
+  rmSync(run, { recursive: true, force: true });
+  mkdirSync(run);
+  let json = null;
+  let failed;
   try {
-    execFileSync('npx', args, { cwd: top, stdio: ['ignore', 'pipe', 'pipe'], timeout: DUP_TIMEOUT, maxBuffer: 1 << 26, env: { ...process.env, JSCPD_NO_TIPS: '1' } });
-  } catch (err) {
-    if (err.code === 'ENOENT') return { duplicates: null, why: 'npx not found' };
-    if (err.signal || err.code === 'ETIMEDOUT') return { duplicates: null, why: `jscpd timed out after ${DUP_TIMEOUT / 1000} s` };
-    const msg = String(err.stderr ?? '').split('\n').find((l) => l.trim()) ?? `exit ${err.status}`;
-    return { duplicates: null, why: `jscpd failed: ${msg.trim().slice(0, 160)}` };
+    failed = runJscpd(top, run, base);
+    if (!failed) json = readJson(join(run, 'report.json'));
+  } finally {
+    rmSync(run, { recursive: true, force: true });
   }
-  const json = readJson(join(out, 'report.json'));
-  if (!Array.isArray(json?.duplicates)) return { duplicates: null, why: 'jscpd report unreadable' };
-  const loc = (f) => ({ path: String(f?.name ?? '').replace(/^\.\//, ''), start: f?.start, end: f?.end });
+  if (!failed && !Array.isArray(json?.duplicates)) failed = 'jscpd report unreadable';
+  if (failed) {
+    removeBaseWorktrees(top);
+    return { duplicates: null, why: failed };
+  }
+  const tops = [top, realpathSync(top)];
+  const rel = (name) => {
+    let p = String(name ?? '');
+    if (isAbsolute(p)) {
+      const t = tops.find((x) => p.startsWith(`${x}/`));
+      p = t ? p.slice(t.length + 1) : relative(top, p);
+    }
+    return p.replace(/^(\.\/)+/, '');
+  };
+  const loc = (f) => ({ path: rel(f?.name), start: f?.start, end: f?.end });
   const clones = json.duplicates
     .filter((d) => d.isNew === true)
     .map((d) => ({ a: loc(d.firstFile), b: loc(d.secondFile), lines: d.lines }))
@@ -561,6 +625,7 @@ function audit(args) {
   if (args.includes('--dup')) {
     try { ({ duplicates: report.duplicates, why } = readDuplicates(paths, report)); }
     catch (err) { why = String(err.message).split('\n')[0].slice(0, 160); }
+    if (why) report.duplicatesNote = why;
   }
   process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n'
     : `${formatText(report, unmeasured)}${dupLine(report.duplicates, why)}\n`);

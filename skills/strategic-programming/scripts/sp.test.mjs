@@ -187,6 +187,173 @@ test('audit --dup with no changed code needs no jscpd', () => {
   assert.deepEqual(JSON.parse(r.stdout).duplicates, { count: 0, clones: [] });
 });
 
+// A fake npx first on PATH: it records its cwd and args, then acts on FAKE_MODE with the
+// `-o <dir>` it was given (report = copy FAKE_REPORT to <dir>/report.json).
+const FAKE_NPX = `#!/bin/sh
+pwd -P > "$FAKE_LOG"
+if [ -f package.json ]; then cat package.json >> "$FAKE_LOG"; else echo no-package >> "$FAKE_LOG"; fi
+out=
+for a in "$@"; do printf '%s\\n' "$a" >> "$FAKE_LOG"; done
+while [ $# -gt 0 ]; do
+  [ "$1" = -o ] && out=$2
+  [ "$1" = --config ] && cp "$2" "$FAKE_LOG.config"
+  shift
+done
+[ -n "$out" ] && mkdir -p "$out"
+case "$FAKE_MODE" in
+  fail) echo boom >&2; exit 1 ;;
+  bad) printf 'not json' > "$out/report.json" ;;
+  none) ;;
+  hang) sleep 30 & echo $! > "$FAKE_PID"; wait ;;
+  *) cp "$FAKE_REPORT" "$out/report.json" ;;
+esac
+`;
+
+function fakeNpx(mode, extra = {}) {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'sp-fake-')));
+  writeFileSync(join(bin, 'npx'), FAKE_NPX, { mode: 0o755 });
+  return {
+    bin,
+    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, FAKE_MODE: mode, FAKE_LOG: join(bin, 'log'), ...extra },
+  };
+}
+
+function auditDup(repo, env, json = false) {
+  const r = spawnSync(process.execPath, [SP, 'audit', '--dup', ...(json ? ['--json'] : [])], { cwd: repo, encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  return json ? JSON.parse(r.stdout) : r.stdout.split('\n').find((l) => l.startsWith('duplicates: '));
+}
+
+const clone = (a, b, isNew, at = 1) => ({
+  format: 'typescript', lines: 5, isNew,
+  firstFile: { name: a, start: at, end: at + 4 }, secondFile: { name: b, start: at, end: at + 4 },
+});
+
+function makeDupRepo() {
+  const repo = makeRepo({ 'a.ts': lines(5), 'u1.ts': lines(5, 'u'), 'u2.ts': lines(5, 'u') });
+  write(repo, 'a.ts', lines(6));
+  write(repo, 'b.ts', lines(5));
+  return repo;
+}
+
+function dupState(repo) {
+  return join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
+}
+
+function reportFile(dir, duplicates) {
+  const path = join(dir, 'fake-report.json');
+  writeFileSync(path, JSON.stringify({ duplicates }));
+  return path;
+}
+
+test('audit --dup counts only new clones naming a changed file, with paths relative to the repo', () => {
+  const repo = makeDupRepo();
+  const { bin, env } = fakeNpx('report');
+  env.FAKE_REPORT = reportFile(bin, [
+    clone('a.ts', 'b.ts', false),
+    clone('./a.ts', 'b.ts', true, 10),
+    clone('u1.ts', 'u2.ts', true),
+    clone(join(repo, 'b.ts'), join(repo, 'u1.ts'), true, 20),
+  ]);
+  const a = auditDup(repo, env, true);
+  assert.deepEqual(a.duplicates, {
+    count: 2,
+    clones: [
+      { a: { path: 'a.ts', start: 10, end: 14 }, b: { path: 'b.ts', start: 10, end: 14 }, lines: 5 },
+      { a: { path: 'b.ts', start: 20, end: 24 }, b: { path: 'u1.ts', start: 20, end: 24 }, lines: 5 },
+    ],
+  });
+  assert.equal('duplicatesNote' in a, false);
+  assert.equal(auditDup(repo, env), 'duplicates: 2 new (a.ts:10-14 ~ b.ts:10-14; b.ts:20-24 ~ u1.ts:20-24)');
+  assert.equal(git(repo, 'status', '--porcelain'), 'M a.ts\n?? b.ts');
+});
+
+test('audit --dup lists five clones, then …', () => {
+  const repo = makeDupRepo();
+  const { bin, env } = fakeNpx('report');
+  env.FAKE_REPORT = reportFile(bin, Array.from({ length: 6 }, (_, i) => clone('a.ts', 'b.ts', true, i * 10 + 1)));
+  const line = auditDup(repo, env);
+  assert.match(line, /^duplicates: 6 new \(/);
+  assert.equal(line.match(/ ~ /g).length, 5);
+  assert.ok(line.endsWith('; …)'), line);
+});
+
+test('audit --dup runs jscpd outside the repo with an empty config of its own', () => {
+  const repo = makeDupRepo();
+  write(repo, '.jscpd.json', '{"ignore":["**/*.ts"]}\n');
+  write(repo, '.npmrc', 'registry=http://127.0.0.1:9/\n');
+  write(repo, 'package.json', '{"jscpd":{"ignore":["**/*.ts"]}}\n');
+  const { bin, env } = fakeNpx('report');
+  env.FAKE_REPORT = reportFile(bin, []);
+  assert.equal(auditDup(repo, env), 'duplicates: none');
+  const [cwd, pkg, ...args] = readFileSync(env.FAKE_LOG, 'utf8').trimEnd().split('\n');
+  const state = dupState(repo);
+  // npm takes the nearest package.json as the project (and reads its .npmrc): one of its own.
+  assert.ok(cwd.startsWith(`${realpathSync(state)}/dup.`), `cwd ${cwd}`);
+  assert.equal(pkg, '{}');
+  assert.deepEqual(args.slice(0, 2), ['-y', 'jscpd@5.4.1']);
+  assert.equal(args.at(-1), repo, 'the repo top is the scan path');
+  assert.ok(args.includes('--config'), args.join(' '));
+  assert.equal(readFileSync(`${env.FAKE_LOG}.config`, 'utf8').trim(), '{}');
+  assert.deepEqual(readdirSync(state).filter((f) => f.startsWith('dup')), [], 'the run dir is removed');
+});
+
+test('audit --dup reports a failing jscpd with its first stderr line, in text and json', () => {
+  const repo = makeDupRepo();
+  const { env } = fakeNpx('fail');
+  assert.equal(auditDup(repo, env), 'duplicates: not measured (jscpd failed: boom)');
+  const a = auditDup(repo, env, true);
+  assert.equal(a.duplicates, null);
+  assert.equal(a.duplicatesNote, 'jscpd failed: boom');
+});
+
+test('audit --dup says an invalid report is unreadable', () => {
+  const repo = makeDupRepo();
+  assert.equal(auditDup(repo, fakeNpx('bad').env), 'duplicates: not measured (jscpd report unreadable)');
+});
+
+test('a stale report from an earlier run is never read', () => {
+  const repo = makeDupRepo();
+  audit(repo);
+  const state = dupState(repo);
+  const stale = JSON.stringify({ duplicates: [clone('a.ts', 'b.ts', true)] });
+  for (const d of ['dup', `dup.${process.pid}`, 'dup.1']) {
+    mkdirSync(join(state, d), { recursive: true });
+    writeFileSync(join(state, d, 'report.json'), stale);
+  }
+  assert.equal(auditDup(repo, fakeNpx('fail').env), 'duplicates: not measured (jscpd failed: boom)');
+  assert.equal(auditDup(repo, fakeNpx('none').env), 'duplicates: not measured (jscpd report unreadable)');
+});
+
+test('a failed jscpd run leaves no base worktree behind and keeps the others', () => {
+  const repo = makeDupRepo();
+  const cpd = join(tmpdir(), `cpd-base-ref-test-${process.pid}`);
+  rmSync(cpd, { recursive: true, force: true });
+  const other = join(realpathSync(mkdtempSync(join(tmpdir(), 'sp-wt-'))), 'wt');
+  git(repo, 'worktree', 'add', '-q', '--detach', cpd);
+  git(repo, 'worktree', 'add', '-q', '--detach', other);
+  assert.equal(auditDup(repo, fakeNpx('fail').env), 'duplicates: not measured (jscpd failed: boom)');
+  const listed = git(repo, 'worktree', 'list', '--porcelain').split('\n')
+    .filter((l) => l.startsWith('worktree ')).map((l) => realpathSync(l.slice(9)));
+  assert.deepEqual(listed, [repo, realpathSync(other)]);
+  assert.equal(existsSync(cpd), false);
+});
+
+test('a jscpd that hangs is killed with its children at the timeout', () => {
+  const repo = makeDupRepo();
+  const { bin, env } = fakeNpx('hang', { SP_DUP_TIMEOUT_MS: '500' });
+  env.FAKE_PID = join(bin, 'pid');
+  const t = Date.now();
+  assert.equal(auditDup(repo, env), 'duplicates: not measured (jscpd timed out after 0.5 s)');
+  assert.ok(Date.now() - t < 10_000);
+  const pid = Number(readFileSync(env.FAKE_PID, 'utf8'));
+  let alive = true;
+  for (let i = 0; i < 50 && alive; i++) {
+    try { process.kill(pid, 0); execFileSync('sleep', ['0.05']); } catch { alive = false; }
+  }
+  assert.equal(alive, false, `child ${pid} still running`);
+});
+
 test('audit outside a git repository says so and exits 0', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sp-norepo-')));
   const r = run(dir, ['audit']);
