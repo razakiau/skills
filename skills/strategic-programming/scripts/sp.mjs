@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = new Set('ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte'.split(' '));
 const TEST_RE = [/(^|\/)(__tests__|tests?|e2e|spec)\//, /\.(test|spec)\.[a-z]+$/, /(^|\/)test_[^/]+\.py$/];
@@ -16,12 +17,10 @@ function tryGit(args, opts) {
   try { return git(args, opts).trim(); } catch { return null; }
 }
 
-function repoPaths() {
-  const top = tryGit(['rev-parse', '--show-toplevel']);
-  if (!top) {
-    process.stderr.write('sp: not a git repository\n');
-    process.exit(0);
-  }
+// null outside a git repository (start and audit then say so; the hook stays silent).
+function repoPaths(cwd = process.cwd()) {
+  const top = tryGit(['rev-parse', '--show-toplevel'], { cwd });
+  if (!top) return null;
   const common = resolve(top, git(['rev-parse', '--git-common-dir'], { cwd: top }).trim());
   const hash = createHash('sha1').update(top).digest('hex').slice(0, 12);
   const state = join(common, 'strategic-programming', hash);
@@ -47,8 +46,17 @@ function emptyTree(top) {
   return git(['hash-object', '-w', '-t', 'tree', '--stdin'], { cwd: top, input: '', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
 }
 
-function start() {
+function needRepo() {
   const paths = repoPaths();
+  if (!paths) {
+    process.stderr.write('sp: not a git repository\n');
+    process.exit(0);
+  }
+  return paths;
+}
+
+function start() {
+  const paths = needRepo();
   const { top, state, anchor } = paths;
   const head = tryGit(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: top }) ?? emptyTree(top);
   const dirty = git(['status', '--porcelain', '--untracked-files=all'], { cwd: top }).split('\n').filter(Boolean).length;
@@ -393,8 +401,8 @@ function measured(what, fn, fallback) {
   }
 }
 
-function audit(args) {
-  const paths = repoPaths();
+// The audit object, its text form, and the snapshot tree it measured.
+function buildReport(paths) {
   const base = findBase(paths);
   const tree = snapshotTree(paths);
   const files = readDiff(paths.top, base.ref, tree);
@@ -425,7 +433,55 @@ function audit(args) {
     unlistedHome,
     duplicates: null,
   };
-  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : formatText(report, unmeasured));
+  return { report, text: formatText(report, unmeasured), tree };
+}
+
+function audit(args) {
+  const { report, text } = buildReport(needRepo());
+  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : text);
+}
+
+// Identifies the changed code and test content: the measured paths with their status and
+// their blob in the snapshot tree (none when deleted). Other files never move it.
+function fingerprint(top, report, tree) {
+  const paths = report.files.map((f) => f.path);
+  const blobs = git(['--literal-pathspecs', 'ls-tree', '-r', '-z', tree, '--', ...paths], { cwd: top });
+  const h = createHash('sha1').update(`${report.base.ref}\0`);
+  for (const f of report.files) h.update(`${f.status}\0${f.path}\0`);
+  return h.update(blobs).digest('hex');
+}
+
+const SELF = fileURLToPath(import.meta.url);
+
+// Stop hook: blocks once per distinct code diff with the audit, else prints {}. Always exits 0.
+function hook() {
+  let out = {};
+  try {
+    let input = '';
+    try { input = readFileSync(0, 'utf8'); } catch { /* no stdin */ }
+    const payload = JSON.parse(input);
+    if (payload && typeof payload === 'object' && !payload.stop_hook_active && !payload.stopHookActive) {
+      const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd());
+      const built = paths && buildReport(paths);
+      if (built && built.report.files.some((f) => !f.test)) {
+        const print = fingerprint(paths.top, built.report, built.tree);
+        const file = join(paths.state, 'hook-fingerprint');
+        let last = null;
+        try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
+        if (print !== last) {
+          const reason = `${built.text}\nAnswer every flag above against your placement note: remove the code, `
+            + 'justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
+            + (built.report.size === 'small' ? '' : ` For a Full change also run \`node ${SELF} audit --dup\`.`);
+          writeFileSync(file, `${print}\n`);
+          out = { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
+        }
+      }
+    }
+  } catch {
+    out = {};
+  }
+  process.stdout.write(JSON.stringify(out) + '\n');
+  process.exitCode = 0;
 }
 
 function formatText(r, unmeasured) {
@@ -454,8 +510,9 @@ const [cmd, ...rest] = process.argv.slice(2);
 try {
   if (cmd === 'start') start();
   else if (cmd === 'audit') audit(rest);
+  else if (cmd === 'hook') hook();
   else {
-    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup]\n');
+    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook\n');
     process.exitCode = 2;
   }
 } catch (err) {

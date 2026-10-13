@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

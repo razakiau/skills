@@ -527,3 +527,75 @@ test('a modified file or a new test file in a shared package outside the map is 
   assert.deepEqual(a.shared, ['utils']);
   assert.deepEqual(a.unlistedHome, []);
 });
+
+// The hook is spawned from os.tmpdir(), so only the payload's cwd points it at the repo.
+function hook(payload) {
+  const input = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  const r = spawnSync('node', [SP, 'hook'], { cwd: tmpdir(), input, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+const ANSWER = 'Answer every flag above against your placement note: remove the code, justify it, '
+  + 'or (unlisted home) add a code-map row or move the file. The numbers stand.';
+
+test('blocks once when code changed, then stays silent on the same diff', () => {
+  const repo = makeRepo();
+  write(repo, 'a.ts', lines(6));
+  const out = hook({ cwd: repo, stop_hook_active: false });
+  assert.equal(out.decision, 'block');
+  assert.deepEqual(Object.keys(out).sort(), ['decision', 'hookSpecificOutput', 'reason']);
+  assert.deepEqual(out.hookSpecificOutput, { hookEventName: 'Stop', decision: 'block', reason: out.reason });
+  assert.match(out.reason, /\nsize: small\n/);
+  assert.ok(out.reason.includes(ANSWER), out.reason);
+  assert.equal(git(repo, 'status', '--porcelain'), 'M a.ts', 'the hook writes nothing in the working tree');
+
+  assert.deepEqual(hook({ cwd: repo, stop_hook_active: false }), {});
+  write(repo, 'README.md', 'docs\n');
+  assert.deepEqual(hook({ cwd: repo }), {}, 'a docs edit is not a new code diff');
+  write(repo, 'a.ts', lines(7));
+  assert.equal(hook({ cwd: repo, stop_hook_active: false }).decision, 'block');
+  assert.deepEqual(hook({ cwd: repo }), {});
+  write(repo, 'a.test.ts', lines(2, 't'));
+  assert.equal(hook({ cwd: repo }).decision, 'block', 'a test edit beside the code change is a new diff');
+});
+
+test('silent when already continuing', () => {
+  const repo = makeRepo();
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook({ cwd: repo, stop_hook_active: true }), {});
+  assert.deepEqual(hook({ cwd: repo, stopHookActive: true }), {});
+  assert.equal(hook({ cwd: repo, stopHookActive: false }).decision, 'block');
+});
+
+test('silent without code changes', () => {
+  const repo = makeRepo();
+  write(repo, 'README.md', 'docs\n');
+  assert.deepEqual(hook({ cwd: repo }), {});
+  write(repo, 'a.test.ts', lines(3, 't'));
+  assert.deepEqual(hook({ cwd: repo }), {});
+});
+
+test('silent outside a repo or on bad input', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sp-norepo-')));
+  assert.deepEqual(hook({ cwd: dir, stop_hook_active: false }), {});
+  assert.deepEqual(hook('not json'), {});
+  assert.deepEqual(hook(''), {});
+  assert.deepEqual(hook('null'), {});
+});
+
+test('the --dup hint is given for a full change, not a small one', () => {
+  const dup = `node ${SP} audit --dup`;
+  const small = makeRepo();
+  write(small, 'a.ts', lines(6));
+  const s = hook({ cwd: small });
+  assert.equal(s.decision, 'block');
+  assert.ok(!s.reason.includes('--dup'), s.reason);
+
+  const full = makeRepo();
+  write(full, 'a.ts', lines(6));
+  write(full, 'b.ts', lines(2));
+  const f = hook({ cwd: full });
+  assert.match(f.reason, /\nsize: full\n/);
+  assert.ok(f.reason.includes(`For a Full change also run \`${dup}\`.`), f.reason);
+});
