@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = new Set('ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte'.split(' '));
 const TEST_RE = [/(^|\/)(__tests__|tests?|e2e|spec)\//, /\.(test|spec)\.[a-z]+$/, /(^|\/)test_[^/]+\.py$/];
+// The code files only, so untracked non-code dumps are never hashed by a snapshot.
+const CODE_SPECS = [...CODE_EXT].map((e) => `:(glob)**/*.${e}`);
 
 function git(args, opts = {}) {
   return execFileSync('git', ['--no-optional-locks', ...args], {
@@ -36,6 +38,25 @@ function snapshotTree({ top, state }) {
     if (existsSync(real)) copyFileSync(real, index);
     const env = { ...process.env, GIT_INDEX_FILE: index };
     git(['add', '-A'], { cwd: top, env });
+    return git(['write-tree'], { cwd: top, env }).trim();
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
+// The index with every code file's working-tree content (untracked included, ignored not):
+// the same code entries `snapshotTree` gives, without hashing anything else.
+// (`git add -A -- <pathspecs>` fails when one extension matches nothing, so ls-files feeds update-index.)
+function codeSnapshot({ top, state }) {
+  const index = join(state, `snapshot.${process.pid}.index`);
+  const real = resolve(top, git(['rev-parse', '--git-path', 'index'], { cwd: top }).trim());
+  try {
+    if (existsSync(real)) copyFileSync(real, index);
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    const changed = git(['ls-files', '-z', '-m', '-d', '-o', '--exclude-standard', '--', ...CODE_SPECS], { cwd: top, env });
+    if (changed) {
+      git(['update-index', '-z', '--add', '--remove', '--stdin'], { cwd: top, env, input: changed, stdio: ['pipe', 'pipe', 'ignore'] });
+    }
     return git(['write-tree'], { cwd: top, env }).trim();
   } finally {
     rmSync(index, { force: true });
@@ -208,21 +229,32 @@ function nxGraph(top, state, timeout = 20_000) {
   const bin = join(top, 'node_modules', '.bin', 'nx');
   if (!existsSync(bin)) return null;
   const head = tryGit(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: top })?.slice(0, 12) ?? 'none';
-  const file = join(state, `graph-${head}.json`);
+  const name = `graph-${head}.json`;
+  const file = join(state, name);
   const failed = `${file}.failed`;
   if (existsSync(failed)) return null;
   if (!existsSync(file)) {
-    for (const f of readdirSync(state)) if (f.startsWith('graph-')) rmSync(join(state, f), { force: true });
+    // Other HEADs' graphs go; another process's temp file goes only once it is a minute old.
+    for (const f of readdirSync(state)) {
+      if (!f.startsWith('graph-') || f === name) continue;
+      const temp = /^graph-[^.]+\.\d+\.json$/.test(f);
+      try {
+        if (!temp || Date.now() - statSync(join(state, f)).mtimeMs > 60_000) rmSync(join(state, f), { force: true });
+      } catch { /* removed meanwhile */ }
+    }
+    // nx writes a private file, renamed into place: a reader never sees half a graph.
+    const temp = join(state, `graph-${head}.${process.pid}.json`);
     try {
-      execFileSync(bin, ['graph', `--file=${file}`], { cwd: top, stdio: 'ignore', timeout });
-    } catch { /* checked below */ }
+      execFileSync(bin, ['graph', `--file=${temp}`], { cwd: top, stdio: 'ignore', timeout });
+    } catch {
+      rmSync(temp, { force: true });
+      writeFileSync(failed, '');
+      return null;
+    }
+    try { renameSync(temp, file); } catch { rmSync(temp, { force: true }); }
   }
   const graph = readJson(file)?.graph;
-  if (!graph?.nodes || !graph?.dependencies) {
-    rmSync(file, { force: true });
-    writeFileSync(failed, '');
-    return null;
-  }
+  if (!graph?.nodes || !graph?.dependencies) return null;
   return Object.entries(graph.nodes).map(([name, node]) => ({
     name,
     root: String(node.data?.root ?? '').replace(/^\.(\/|$)|\/$/g, ''),
@@ -401,10 +433,11 @@ function measured(what, fn, fallback) {
   }
 }
 
-// The audit object, its text form, and the snapshot tree it measured.
+// The audit object, its text form, and the snapshot tree it measured (code files only:
+// every measure below reads code paths).
 function buildReport(paths) {
   const base = findBase(paths);
-  const tree = snapshotTree(paths);
+  const tree = codeSnapshot(paths);
   const files = readDiff(paths.top, base.ref, tree);
   const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
   const code = files.filter((f) => !f.test);
@@ -433,12 +466,12 @@ function buildReport(paths) {
     unlistedHome,
     duplicates: null,
   };
-  return { report, text: formatText(report, unmeasured), tree };
+  return { report, unmeasured, tree };
 }
 
 function audit(args) {
-  const { report, text } = buildReport(needRepo());
-  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : text);
+  const { report, unmeasured } = buildReport(needRepo());
+  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : formatText(report, unmeasured));
 }
 
 // Identifies the changed code and test content: the measured paths with their status and
@@ -446,45 +479,95 @@ function audit(args) {
 function fingerprint(top, report, tree) {
   const paths = report.files.map((f) => f.path);
   const blobs = git(['--literal-pathspecs', 'ls-tree', '-r', '-z', tree, '--', ...paths], { cwd: top });
-  const h = createHash('sha1').update(`${report.base.ref}\0`);
+  // A new `start` is a new change point; a merge base or root moving under the same content is not.
+  const h = createHash('sha1').update(report.base.kind === 'start' ? `${report.base.ref}\0` : '\0');
   for (const f of report.files) h.update(`${f.status}\0${f.path}\0`);
   return h.update(blobs).digest('hex');
 }
 
 const SELF = fileURLToPath(import.meta.url);
 
-// Stop hook: blocks once per distinct code diff with the audit, else prints {}. Always exits 0.
-function hook() {
-  let out = {};
+// The hook payload, or null: a terminal, an unreadable stdin (EAGAIN), bad JSON or a non-object are no input.
+function readPayload() {
+  if (process.stdin.isTTY) return null;
+  let input = '';
+  try { input = readFileSync(0, 'utf8'); } catch { return null; }
   try {
-    let input = '';
-    try { input = readFileSync(0, 'utf8'); } catch { /* no stdin */ }
     const payload = JSON.parse(input);
-    if (payload && typeof payload === 'object' && !payload.stop_hook_active && !payload.stopHookActive) {
-      const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd());
-      const built = paths && buildReport(paths);
-      if (built && built.report.files.some((f) => !f.test)) {
-        const print = fingerprint(paths.top, built.report, built.tree);
-        const file = join(paths.state, 'hook-fingerprint');
-        let last = null;
-        try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
-        if (print !== last) {
-          const reason = `${built.text}\nAnswer every flag above against your placement note: remove the code, `
-            + 'justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
-            + (built.report.size === 'small' ? '' : ` For a Full change also run \`node ${SELF} audit --dup\`.`);
-          writeFileSync(file, `${print}\n`);
-          out = { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
-        }
-      }
-    }
+    return payload && typeof payload === 'object' ? payload : null;
   } catch {
-    out = {};
+    return null;
   }
+}
+
+// The payload's repo, only when it opted in: a code map at the top or a recorded start.
+function optedIn(payload) {
+  const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd());
+  if (!paths) return null;
+  return existsSync(join(paths.top, '.agents', 'code-map.md')) || existsSync(join(paths.state, 'start.json')) ? paths : null;
+}
+
+// One turn-start record per session (VS Code sends session_id, Copilot CLI sessionId).
+function turnFile({ state }, payload) {
+  const id = [payload.session_id, payload.sessionId, payload.SessionId].find((v) => typeof v === 'string' && v);
+  return join(state, `turn-${id ? createHash('sha1').update(id).digest('hex').slice(0, 12) : 'nosession'}`);
+}
+
+function silently(fn) {
+  let out = {};
+  try { out = fn() ?? {}; } catch { out = {}; }
   process.stdout.write(JSON.stringify(out) + '\n');
   process.exitCode = 0;
 }
 
-function formatText(r, unmeasured) {
+// UserPromptSubmit: records the code snapshot the agent's turn starts from. Prints {}.
+function turn() {
+  silently(() => {
+    const payload = readPayload();
+    const paths = payload && optedIn(payload);
+    if (paths) writeFileSync(turnFile(paths, payload), `${codeSnapshot(paths)}\n`);
+  });
+}
+
+// Whether a non-test, non-generated code file differs between the turn-start tree and now;
+// null when the session has no usable turn record.
+function turnChangedCode(paths, payload) {
+  let from;
+  try { from = readFileSync(turnFile(paths, payload), 'utf8').trim(); } catch { return null; }
+  if (!/^[0-9a-f]{40,64}$/.test(from) || tryGit(['cat-file', '-e', `${from}^{tree}`], { cwd: paths.top }) === null) return null;
+  const now = codeSnapshot(paths);
+  const code = git(['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, now], { cwd: paths.top })
+    .split('\0').filter((p) => p && isCode(p) && !isTest(p));
+  const gen = generated(paths.top, code);
+  return code.some((p) => !gen.has(p));
+}
+
+const MAX_HOOK_FILES = 40;
+
+// Stop hook: blocks once per distinct code diff with the audit, but only after a turn in which
+// the agent changed code (or when the harness never sent the turn start). Always exits 0.
+function hook() {
+  silently(() => {
+    const payload = readPayload();
+    if (!payload || payload.stop_hook_active || payload.stopHookActive) return null;
+    const paths = optedIn(payload);
+    if (!paths || turnChangedCode(paths, payload) === false) return null;
+    const built = buildReport(paths);
+    if (!built.report.files.some((f) => !f.test)) return null;
+    const print = fingerprint(paths.top, built.report, built.tree);
+    const file = join(paths.state, 'hook-fingerprint');
+    let last = null;
+    try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
+    if (print === last) return null;
+    const reason = `${formatText(built.report, built.unmeasured, MAX_HOOK_FILES)}\nAnswer every flag above against your `
+      + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
+      + (built.report.size === 'small' ? '' : ` For a Full change also run \`node "${SELF}" audit --dup\`.`);
+    writeFileSync(file, `${print}\n`);
+    return { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
+  });
+}
+
+function formatText(r, unmeasured, maxFiles = Infinity) {
   // TS/JS files give names or "none"; other languages are named as not measured.
   const code = r.files.filter((f) => !f.test);
   const other = [...new Set(code.map((f) => ext(f.path)).filter((e) => !JS_EXT.has(e)))].sort();
@@ -497,7 +580,8 @@ function formatText(r, unmeasured) {
     `size: ${r.size}`,
     `shared: ${r.shared.length ? r.shared.join(', ') : 'none'}`,
     `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
-    ...r.files.map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
+    ...r.files.slice(0, maxFiles).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
+    ...(r.files.length > maxFiles ? [`… and ${r.files.length - maxFiles} more (run audit for the full list)`] : []),
     `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,
     `exports: ${exportsLine}`,
     `tests beside: ${r.testBeside === null ? 'not measured (error)'
@@ -511,8 +595,9 @@ try {
   if (cmd === 'start') start();
   else if (cmd === 'audit') audit(rest);
   else if (cmd === 'hook') hook();
+  else if (cmd === 'turn') turn();
   else {
-    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook\n');
+    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn\n');
     process.exitCode = 2;
   }
 } catch (err) {

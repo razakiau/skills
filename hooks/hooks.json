@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs\" turn",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

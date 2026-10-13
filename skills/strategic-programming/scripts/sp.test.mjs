@@ -529,18 +529,25 @@ test('a modified file or a new test file in a shared package outside the map is 
 });
 
 // The hook is spawned from os.tmpdir(), so only the payload's cwd points it at the repo.
-function hook(payload) {
+function call(cmd, payload) {
   const input = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  const r = spawnSync('node', [SP, 'hook'], { cwd: tmpdir(), input, encoding: 'utf8' });
+  const r = spawnSync('node', [SP, cmd], { cwd: tmpdir(), input, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }
+const hook = (payload) => call('hook', payload);
+const turn = (payload) => call('turn', payload);
+
+const MAP = { '.agents/code-map.md': '| Concept | Path |\n|---|---|\n| all | src |\n' };
+// A repo that opted in to the hook through a committed code map.
+const makeHookRepo = (files = { 'a.ts': lines(5) }) => makeRepo({ ...files, ...MAP });
+const stateOf = (repo) => join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
 
 const ANSWER = 'Answer every flag above against your placement note: remove the code, justify it, '
   + 'or (unlisted home) add a code-map row or move the file. The numbers stand.';
 
 test('blocks once when code changed, then stays silent on the same diff', () => {
-  const repo = makeRepo();
+  const repo = makeHookRepo();
   write(repo, 'a.ts', lines(6));
   const out = hook({ cwd: repo, stop_hook_active: false });
   assert.equal(out.decision, 'block');
@@ -561,7 +568,7 @@ test('blocks once when code changed, then stays silent on the same diff', () => 
 });
 
 test('silent when already continuing', () => {
-  const repo = makeRepo();
+  const repo = makeHookRepo();
   write(repo, 'a.ts', lines(6));
   assert.deepEqual(hook({ cwd: repo, stop_hook_active: true }), {});
   assert.deepEqual(hook({ cwd: repo, stopHookActive: true }), {});
@@ -569,11 +576,12 @@ test('silent when already continuing', () => {
 });
 
 test('silent without code changes', () => {
-  const repo = makeRepo();
+  const repo = makeHookRepo();
   write(repo, 'README.md', 'docs\n');
   assert.deepEqual(hook({ cwd: repo }), {});
   write(repo, 'a.test.ts', lines(3, 't'));
   assert.deepEqual(hook({ cwd: repo }), {});
+  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
 });
 
 test('silent outside a repo or on bad input', () => {
@@ -582,20 +590,123 @@ test('silent outside a repo or on bad input', () => {
   assert.deepEqual(hook('not json'), {});
   assert.deepEqual(hook(''), {});
   assert.deepEqual(hook('null'), {});
+  assert.deepEqual(turn({ cwd: dir }), {});
+  assert.deepEqual(turn('not json'), {});
+  assert.deepEqual(turn(''), {});
 });
 
 test('the --dup hint is given for a full change, not a small one', () => {
-  const dup = `node ${SP} audit --dup`;
-  const small = makeRepo();
+  const dup = `node "${SP}" audit --dup`;
+  const small = makeHookRepo();
   write(small, 'a.ts', lines(6));
   const s = hook({ cwd: small });
   assert.equal(s.decision, 'block');
   assert.ok(!s.reason.includes('--dup'), s.reason);
 
-  const full = makeRepo();
+  const full = makeHookRepo();
   write(full, 'a.ts', lines(6));
   write(full, 'b.ts', lines(2));
   const f = hook({ cwd: full });
   assert.match(f.reason, /\nsize: full\n/);
   assert.ok(f.reason.includes(`For a Full change also run \`${dup}\`.`), f.reason);
+});
+
+// A feature branch off main that already holds a committed code change.
+function makeBranchRepo() {
+  const repo = makeHookRepo();
+  git(repo, 'checkout', '-q', '-b', 'feat');
+  write(repo, 'b.ts', lines(4));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'feat');
+  return repo;
+}
+
+test('a turn with no code change stays silent even when the branch has code', () => {
+  const repo = makeBranchRepo();
+  assert.deepEqual(turn({ cwd: repo, session_id: 's1' }), {});
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
+  assert.equal(hook({ cwd: repo, session_id: 'never-sent-a-prompt' }).decision, 'block',
+    'without a turn record the hook judges the diff since the base');
+  assert.equal(git(repo, 'status', '--porcelain'), '', 'turn and hook write nothing in the working tree');
+});
+
+test('a turn where the agent changed code blocks', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, sessionId: 's1' });
+  write(repo, 'a.ts', lines(6));
+  const out = hook({ cwd: repo, sessionId: 's1' });
+  assert.equal(out.decision, 'block');
+  assert.match(out.reason, /\nM a\.ts \+1 -0\n/);
+  assert.match(out.reason, /\nA b\.ts \+4 -0\n/, 'the reason is still the whole audit since the base');
+});
+
+test('a turn that changed only tests or docs stays silent', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.test.ts', lines(2, 't'));
+  write(repo, 'notes.md', 'x\n');
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+});
+
+test('user edits between turns are not judged', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+  write(repo, 'a.ts', lines(8));
+  turn({ cwd: repo, session_id: 's1' });
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+});
+
+test('sessions are separate', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.ts', lines(6));
+  turn({ cwd: repo, session_id: 's2' });
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+  assert.deepEqual(hook({ cwd: repo, session_id: 's2' }), {}, 's2 did not change code in its turn');
+});
+
+test('a turn without a session id is recorded under one key', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo });
+  assert.ok(readdirSync(stateOf(repo)).includes('turn-nosession'));
+  assert.deepEqual(hook({ cwd: repo }), {});
+  write(repo, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: repo }).decision, 'block');
+});
+
+test('no opt-in means silent', () => {
+  const repo = makeRepo();
+  assert.deepEqual(turn({ cwd: repo, session_id: 's1' }), {});
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('turn-')), 'turn records nothing without opt-in');
+
+  const started = makeRepo();
+  run(started, ['start']);
+  write(started, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: started }).decision, 'block', 'a recorded start opts in');
+});
+
+test('after a block, committing the same change stays silent', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+  git(repo, 'commit', '-q', '-am', 'work');
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+});
+
+test('the hook reason lists at most 40 files', () => {
+  const files = Object.fromEntries(Array.from({ length: 45 }, (_, i) => [`f${i}.ts`, lines(2)]));
+  const repo = makeHookRepo(files);
+  for (const p of Object.keys(files)) write(repo, p, lines(3));
+  const out = hook({ cwd: repo });
+  assert.equal(out.decision, 'block');
+  assert.equal(out.reason.match(/^M f\d+\.ts /gm).length, 40);
+  assert.ok(out.reason.includes('… and 5 more (run audit for the full list)'), out.reason);
+  const full = run(repo, ['audit']);
+  assert.equal(full.stdout.match(/^M f\d+\.ts /gm).length, 45, 'audit itself is not capped');
 });
