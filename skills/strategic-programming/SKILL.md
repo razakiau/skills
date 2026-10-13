@@ -19,7 +19,7 @@ The script decides the size. You predict it from your plan and state it before w
 
 | Size | The change | Before | After |
 | --- | --- | --- | --- |
-| Small | at most one non-test code file, no new code file, no new export, no shared package (test files anywhere are fine) | `start`, then one line: `owner: <layer>, precedent: <file:symbol>` | `audit`, answer its flags |
+| Small | at most one non-test code file, no new code file, no new export, no shared package (test files anywhere are fine) | `start`, then one line: `owner: <path>, precedent: <file:symbol>, call sites: <n> (<where searched>)` | `audit`, answer its flags |
 | Full | anything else | `start`, then the five-part placement note | `audit --dup`, answer every flag, the reading checks |
 | Full + reviewer | Full, and it touches a shared package (or the owner asks) | as Full | as Full, plus a fresh reviewer |
 
@@ -41,7 +41,7 @@ Read `.agents/code-map.md` at the repo top: concept rows (concept, home, path, p
 
 In chat, before any code: state the predicted size, then the note for that size. A Small change writes the one line from the table. Full writes all five parts.
 
-For a bug, first locate the line that produces the symptom, by reproducing it or reading to it, and say whether the code matches the report. When it does not (the code would throw where the report says it prints), ask the owner before going on.
+For a bug, first locate the line that produces the symptom, by reproducing it or reading to it, and say whether the code matches the report. When it does not (the code would throw where the report says it prints), ask the owner before going on, with the size you would predict for each reading of the report.
 
 1. **Owning layer**, with evidence: the code map row first, then the dependency graph (`nx graph --file=<tmp file>`, `graphify query "<concept>"`, or package manifests plus an import search). Rules placed in a shared package reach every consumer. A concept can span layers: a fact derived in the domain, its mapping in a lib, its label in presentation. Name the owning layer of each piece the change touches; the invariants decide (no i18n in the domain, for example).
 2. **Precedent**: the nearest existing code that solves the same kind of problem, as file and symbol. Search for the concept's name, then its siblings (other getters, other mappers of the same entity). The change copies the precedent's shape: its file, naming and signature style.
