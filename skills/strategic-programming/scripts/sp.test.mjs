@@ -1,12 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SP = join(dirname(fileURLToPath(import.meta.url)), 'sp.mjs');
+
+Object.assign(process.env, {
+  GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com',
+  GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com',
+});
 
 function git(repo, ...args) {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -72,9 +79,42 @@ test('audit without start uses the merge base and says so', () => {
   const r = run(repo, ['audit']);
   assert.equal(r.code, 0, r.stderr);
   const [first, ...rest] = r.stdout.split('\n');
-  assert.match(first, /^base: (merge-base|root) [0-9a-f]{12}$/);
+  assert.match(first, /^base: merge-base [0-9a-f]{12}$/);
   assert.ok(rest.includes('M a.ts +1 -0'), r.stdout);
-  assert.ok(['merge-base', 'root'].includes(audit(repo).base.kind));
+  assert.deepEqual(audit(repo).base, { ref: git(repo, 'rev-parse', 'HEAD'), kind: 'merge-base' });
+});
+
+test('with no default branch the base is the root commit', () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sp-test-')));
+  git(repo, 'init', '-q', '-b', 'trunk');
+  write(repo, 'a.ts', lines(2));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'init');
+  write(repo, 'a.ts', lines(3));
+  assert.deepEqual(audit(repo).base, { ref: git(repo, 'rev-parse', 'HEAD'), kind: 'root' });
+});
+
+test('a branch made from origin/main with no local main audits from origin/main', () => {
+  const up = makeRepo();
+  write(up, 'old.ts', lines(4));
+  git(up, 'add', '-A');
+  git(up, 'commit', '-q', '-m', 'main 2');
+  const bare = realpathSync(mkdtempSync(join(tmpdir(), 'sp-bare-')));
+  git(bare, 'clone', '-q', '--bare', up, '.');
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sp-clone-')));
+  git(repo, 'clone', '-q', bare, '.');
+  git(repo, 'switch', '-q', '-c', 'feat', 'origin/main');
+  git(repo, 'branch', '-q', '-D', 'main');
+  write(repo, 'b.ts', lines(2));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'feat');
+  const expected = { ref: git(repo, 'rev-parse', 'origin/main'), kind: 'merge-base' };
+  for (const unsetHead of [false, true]) {
+    if (unsetHead) git(repo, 'remote', 'set-head', 'origin', '-d');
+    const a = audit(repo);
+    assert.deepEqual(a.base, expected, `origin/HEAD unset: ${unsetHead}`);
+    assert.deepEqual(a.files.map((f) => f.path), ['b.ts']);
+  }
 });
 
 test('detached HEAD on a branch audits from the merge base with main', () => {
@@ -138,6 +178,61 @@ test('paths with spaces and accents are read whole', () => {
   assert.deepEqual(a.newFiles, ['src/é dir/a b.ts']);
   assert.deepEqual(a.code, { added: 3, removed: 0 });
   assert.ok(run(repo, ['audit']).stdout.includes('A src/é dir/a b.ts +3 -0\n'));
+});
+
+test('the start point survives gc, and a lost one falls back to the merge base', () => {
+  const repo = makeRepo();
+  write(repo, 'pre.ts', lines(9));
+  run(repo, ['start']);
+  git(repo, 'gc', '-q', '--prune=now');
+  assert.equal(audit(repo).base.kind, 'start');
+
+  for (const ref of git(repo, 'for-each-ref', '--format=%(refname)', 'refs/strategic-programming/').split('\n')) {
+    if (ref) git(repo, 'update-ref', '-d', ref);
+  }
+  git(repo, 'gc', '-q', '--prune=now');
+  const r = run(repo, ['audit']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout.split('\n')[0], /^base: merge-base [0-9a-f]{12} \(start point missing\)$/);
+  assert.equal(audit(repo).base.kind, 'merge-base');
+});
+
+test('an error is reported on stderr and audit still exits 0', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  const hash = createHash('sha1').update(repo).digest('hex').slice(0, 12);
+  writeFileSync(join(repo, '.git', 'strategic-programming', hash, 'start.json'), '{not json');
+  const r = run(repo, ['audit']);
+  assert.equal(r.code, 0);
+  assert.match(r.stderr, /^sp: .+\n$/);
+});
+
+test('start and audit leave the real index alone and no private index behind', () => {
+  const repo = makeRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  write(repo, 'a.ts', lines(6));
+  git(repo, 'add', 'a.ts');
+  utimesSync(join(repo, 'b.ts'), 1e9, 1e9); // same content, new mtime: a status refresh would rewrite the index
+  const index = join(repo, '.git', 'index');
+  const before = [git(repo, 'diff', '--cached', '--name-only'), readFileSync(index).toString('hex')];
+  run(repo, ['start']);
+  utimesSync(join(repo, 'b.ts'), 2e9, 2e9);
+  audit(repo);
+  assert.deepEqual([git(repo, 'diff', '--cached', '--name-only'), readFileSync(index).toString('hex')], before);
+  const hash = createHash('sha1').update(repo).digest('hex').slice(0, 12);
+  assert.deepEqual(readdirSync(join(repo, '.git', 'strategic-programming', hash)), ['start.json']);
+});
+
+test('ignored and generated files are not counted', () => {
+  const repo = makeRepo({ 'a.ts': lines(5), '.gitignore': 'out/\n', '.gitattributes': 'gen/*.ts linguist-generated\n' });
+  run(repo, ['start']);
+  write(repo, 'out/x.ts', lines(3));
+  write(repo, 'gen/x.ts', lines(3));
+  write(repo, '.pnp.cjs', lines(3));
+  write(repo, '.pnp.loader.mjs', lines(3));
+  write(repo, 'a.ts', lines(6));
+  const a = audit(repo);
+  assert.deepEqual(a.files.map((f) => f.path), ['a.ts']);
+  assert.deepEqual(a.newFiles, []);
 });
 
 test('two code files or a new code file is full', () => {
