@@ -9,9 +9,14 @@ const TEST_RE = [/(^|\/)(__tests__|tests?|e2e|spec)\//, /\.(test|spec)\.[a-z]+$/
 // The code files only, so untracked non-code dumps are never hashed by a snapshot.
 const CODE_SPECS = [...CODE_EXT].map((e) => `:(glob)**/*.${e}`);
 
+// These would turn the `:(glob)` pathspecs into literal (or case-folded) ones and hide changes.
+const PATHSPEC_ENV = ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS'];
+
 function git(args, opts = {}) {
+  const env = { ...(opts.env ?? process.env) };
+  for (const v of PATHSPEC_ENV) delete env[v];
   return execFileSync('git', ['--no-optional-locks', ...args], {
-    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 28, ...opts,
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 28, ...opts, env,
   });
 }
 
@@ -20,18 +25,30 @@ function tryGit(args, opts) {
 }
 
 // null outside a git repository (start and audit then say so; the hook stays silent).
-function repoPaths(cwd = process.cwd()) {
+// `mkdir: false` leaves the state dir uncreated (turn and hook before the repo opted in).
+function repoPaths(cwd = process.cwd(), { mkdir = true } = {}) {
   const top = tryGit(['rev-parse', '--show-toplevel'], { cwd });
   if (!top) return null;
   const common = resolve(top, git(['rev-parse', '--git-common-dir'], { cwd: top }).trim());
   const hash = createHash('sha1').update(top).digest('hex').slice(0, 12);
   const state = join(common, 'strategic-programming', hash);
-  mkdirSync(state, { recursive: true });
+  if (mkdir) mkdirSync(state, { recursive: true });
   return { top, state, anchor: `refs/strategic-programming/${hash}` };
+}
+
+// A killed run leaves its private index (and lock) behind; any older than a minute goes.
+function pruneSnapshots(state) {
+  for (const f of readdirSync(state)) {
+    if (!/^snapshot\..*\.index/.test(f)) continue;
+    try {
+      if (Date.now() - statSync(join(state, f)).mtimeMs > 60_000) rmSync(join(state, f), { force: true });
+    } catch { /* removed meanwhile */ }
+  }
 }
 
 // Hashes the whole working tree (untracked included) into a tree, through a private copy of the index.
 function snapshotTree({ top, state }) {
+  pruneSnapshots(state);
   const index = join(state, `snapshot.${process.pid}.index`);
   const real = resolve(top, git(['rev-parse', '--git-path', 'index'], { cwd: top }).trim());
   try {
@@ -47,16 +64,22 @@ function snapshotTree({ top, state }) {
 // The index with every code file's working-tree content (untracked included, ignored not):
 // the same code entries `snapshotTree` gives, without hashing anything else.
 // (`git add -A -- <pathspecs>` fails when one extension matches nothing, so ls-files feeds update-index.)
+// Any path still unmerged (a conflict on a non-code file too) is then taken as it is on disk,
+// or write-tree would fail.
 function codeSnapshot({ top, state }) {
+  pruneSnapshots(state);
   const index = join(state, `snapshot.${process.pid}.index`);
   const real = resolve(top, git(['rev-parse', '--git-path', 'index'], { cwd: top }).trim());
   try {
     if (existsSync(real)) copyFileSync(real, index);
     const env = { ...process.env, GIT_INDEX_FILE: index };
+    const update = (input) => git(['update-index', '-z', '--add', '--remove', '--stdin'],
+      { cwd: top, env, input, stdio: ['pipe', 'pipe', 'ignore'] });
     const changed = git(['ls-files', '-z', '-m', '-d', '-o', '--exclude-standard', '--', ...CODE_SPECS], { cwd: top, env });
-    if (changed) {
-      git(['update-index', '-z', '--add', '--remove', '--stdin'], { cwd: top, env, input: changed, stdio: ['pipe', 'pipe', 'ignore'] });
-    }
+    if (changed) update(changed);
+    const unmerged = new Set(git(['ls-files', '-z', '-u'], { cwd: top, env }).split('\0').filter(Boolean)
+      .map((e) => e.slice(e.indexOf('\t') + 1)));
+    if (unmerged.size) update([...unmerged].join('\0') + '\0');
     return git(['write-tree'], { cwd: top, env }).trim();
   } finally {
     rmSync(index, { force: true });
@@ -141,8 +164,10 @@ function generated(top, paths) {
   return gen;
 }
 
+// Code paths only, on both sides: a rename pairs two code files, never a code file with
+// a non-code one (`a.ts` -> `a.md` is a deletion, `x.ts.orig` is no source for `y.ts`).
 function readDiff(top, base, tree) {
-  const range = [base, tree];
+  const range = [base, tree, '--', ...CODE_SPECS];
   const status = new Map();
   const ns = git(['diff-tree', '-r', '-M', '-z', '--name-status', ...range], { cwd: top }).split('\0');
   for (let i = 0; i + 1 < ns.length;) {
@@ -233,6 +258,7 @@ function nxGraph(top, state, timeout = 20_000) {
   const file = join(state, name);
   const failed = `${file}.failed`;
   if (existsSync(failed)) return null;
+  let wrote = false;
   if (!existsSync(file)) {
     // Other HEADs' graphs go; another process's temp file goes only once it is a minute old.
     for (const f of readdirSync(state)) {
@@ -251,10 +277,15 @@ function nxGraph(top, state, timeout = 20_000) {
       writeFileSync(failed, '');
       return null;
     }
-    try { renameSync(temp, file); } catch { rmSync(temp, { force: true }); }
+    try { renameSync(temp, file); wrote = true; } catch { rmSync(temp, { force: true }); }
   }
   const graph = readJson(file)?.graph;
-  if (!graph?.nodes || !graph?.dependencies) return null;
+  if (!graph?.nodes || !graph?.dependencies) {
+    // Our own nx output that does not parse is a failure for this HEAD; a file another
+    // process wrote may still be in progress or be fixed by it, so it is left unmarked.
+    if (wrote) writeFileSync(failed, '');
+    return null;
+  }
   return Object.entries(graph.nodes).map(([name, node]) => ({
     name,
     root: String(node.data?.root ?? '').replace(/^\.(\/|$)|\/$/g, ''),
@@ -434,10 +465,9 @@ function measured(what, fn, fallback) {
 }
 
 // The audit object, its text form, and the snapshot tree it measured (code files only:
-// every measure below reads code paths).
-function buildReport(paths) {
+// every measure below reads code paths). `tree` reuses a snapshot the caller just took.
+function buildReport(paths, tree = codeSnapshot(paths)) {
   const base = findBase(paths);
-  const tree = codeSnapshot(paths);
   const files = readDiff(paths.top, base.ref, tree);
   const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
   const code = files.filter((f) => !f.test);
@@ -501,16 +531,20 @@ function readPayload() {
 }
 
 // The payload's repo, only when it opted in: a code map at the top or a recorded start.
+// The state dir is created only then.
 function optedIn(payload) {
-  const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd());
+  const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd(), { mkdir: false });
   if (!paths) return null;
-  return existsSync(join(paths.top, '.agents', 'code-map.md')) || existsSync(join(paths.state, 'start.json')) ? paths : null;
+  if (!existsSync(join(paths.top, '.agents', 'code-map.md')) && !existsSync(join(paths.state, 'start.json'))) return null;
+  mkdirSync(paths.state, { recursive: true });
+  return paths;
 }
 
-// One turn-start record per session (VS Code sends session_id, Copilot CLI sessionId).
+// One turn-start record per session (VS Code sends session_id, Copilot CLI sessionId);
+// null without an id: an id-less turn cannot be told apart from another session's.
 function turnFile({ state }, payload) {
   const id = [payload.session_id, payload.sessionId, payload.SessionId].find((v) => typeof v === 'string' && v);
-  return join(state, `turn-${id ? createHash('sha1').update(id).digest('hex').slice(0, 12) : 'nosession'}`);
+  return id ? join(state, `turn-${createHash('sha1').update(id).digest('hex').slice(0, 12)}`) : null;
 }
 
 function silently(fn) {
@@ -525,34 +559,39 @@ function turn() {
   silently(() => {
     const payload = readPayload();
     const paths = payload && optedIn(payload);
-    if (paths) writeFileSync(turnFile(paths, payload), `${codeSnapshot(paths)}\n`);
+    const file = paths && turnFile(paths, payload);
+    if (file) writeFileSync(file, `${codeSnapshot(paths)}\n`);
   });
 }
 
-// Whether a non-test, non-generated code file differs between the turn-start tree and now;
-// null when the session has no usable turn record.
+// `{ changed, tree }`: whether a non-test, non-generated code file differs between the
+// turn-start tree and `tree` (the code snapshot now); null when the session has no usable record.
 function turnChangedCode(paths, payload) {
+  const file = turnFile(paths, payload);
   let from;
-  try { from = readFileSync(turnFile(paths, payload), 'utf8').trim(); } catch { return null; }
+  try { from = readFileSync(file, 'utf8').trim(); } catch { return null; }
   if (!/^[0-9a-f]{40,64}$/.test(from) || tryGit(['cat-file', '-e', `${from}^{tree}`], { cwd: paths.top }) === null) return null;
-  const now = codeSnapshot(paths);
-  const code = git(['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, now], { cwd: paths.top })
+  const tree = codeSnapshot(paths);
+  const code = git(['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, tree], { cwd: paths.top })
     .split('\0').filter((p) => p && isCode(p) && !isTest(p));
   const gen = generated(paths.top, code);
-  return code.some((p) => !gen.has(p));
+  return { changed: code.some((p) => !gen.has(p)), tree };
 }
 
 const MAX_HOOK_FILES = 40;
 
 // Stop hook: blocks once per distinct code diff with the audit, but only after a turn in which
-// the agent changed code (or when the harness never sent the turn start). Always exits 0.
+// the agent changed code (or when there is no turn record: no session id, or the harness never
+// sent the turn start). Always exits 0.
 function hook() {
   silently(() => {
     const payload = readPayload();
     if (!payload || payload.stop_hook_active || payload.stopHookActive) return null;
     const paths = optedIn(payload);
-    if (!paths || turnChangedCode(paths, payload) === false) return null;
-    const built = buildReport(paths);
+    if (!paths) return null;
+    const turned = turnChangedCode(paths, payload);
+    if (turned && !turned.changed) return null;
+    const built = buildReport(paths, turned?.tree);
     if (!built.report.files.some((f) => !f.test)) return null;
     const print = fingerprint(paths.top, built.report, built.tree);
     const file = join(paths.state, 'hook-fingerprint');

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -37,13 +37,13 @@ function makeRepo(files = { 'a.ts': lines(5) }) {
   return repo;
 }
 
-function run(repo, args, stdin) {
-  const r = spawnSync('node', [SP, ...args], { cwd: repo, input: stdin, encoding: 'utf8' });
+function run(repo, args, stdin, env) {
+  const r = spawnSync('node', [SP, ...args], { cwd: repo, input: stdin, encoding: 'utf8', env: { ...process.env, ...env } });
   return { stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
-function audit(repo) {
-  const r = run(repo, ['audit', '--json']);
+function audit(repo, env) {
+  const r = run(repo, ['audit', '--json'], undefined, env);
   assert.equal(r.code, 0, r.stderr);
   return JSON.parse(r.stdout);
 }
@@ -168,6 +168,75 @@ test('a rename is not a new file', () => {
   assert.deepEqual(a.newFiles, []);
   assert.deepEqual(a.files, [{ path: 'b.ts', added: 0, removed: 0, test: false, status: 'R' }]);
   assert.equal(a.size, 'small');
+});
+
+test('an untracked non-code file present at start is not a rename source', () => {
+  const repo = makeRepo();
+  write(repo, 'x.ts.orig', lines(20, 'x'));
+  run(repo, ['start']);
+  write(repo, 'y.ts', lines(20, 'x') + 'one more\n');
+  const a = audit(repo);
+  assert.deepEqual(a.files.map((f) => [f.path, f.status]), [['y.ts', 'A']]);
+  assert.deepEqual(a.newFiles, ['y.ts']);
+});
+
+test('a code file renamed to a non-code name is deleted, staged or not', () => {
+  const deleted = [{ path: 'a.ts', added: 0, removed: 5, test: false, status: 'D' }];
+  const staged = makeRepo();
+  run(staged, ['start']);
+  git(staged, 'mv', 'a.ts', 'a.md');
+  assert.deepEqual(audit(staged).files, deleted);
+
+  const unstaged = makeRepo();
+  run(unstaged, ['start']);
+  write(unstaged, 'a.md', readFileSync(join(unstaged, 'a.ts'), 'utf8'));
+  rmSync(join(unstaged, 'a.ts'));
+  assert.deepEqual(audit(unstaged).files, deleted);
+});
+
+test('an unstaged rm of a code file is a deletion', () => {
+  const repo = makeRepo({ 'a.ts': lines(5), 'b.ts': lines(2) });
+  rmSync(join(repo, 'a.ts'));
+  assert.ok(run(repo, ['audit']).stdout.includes('\nD a.ts +0 -5\n'));
+  assert.deepEqual(audit(repo).files.map((f) => [f.path, f.status]), [['a.ts', 'D']]);
+});
+
+test('pathspec settings in the environment do not hide changes', () => {
+  const repo = makeRepo();
+  write(repo, 'a.ts', lines(6));
+  for (const v of ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) {
+    assert.deepEqual(audit(repo, { [v]: '1' }).files.map((f) => f.path), ['a.ts'], v);
+  }
+});
+
+test('stale private indexes are cleaned, fresh ones kept', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  const state = join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
+  for (const f of ['snapshot.1.index', 'snapshot.2.index.lock', 'snapshot.3.index']) writeFileSync(join(state, f), '');
+  utimesSync(join(state, 'snapshot.1.index'), 1e9, 1e9);
+  utimesSync(join(state, 'snapshot.2.index.lock'), 1e9, 1e9);
+  write(repo, 'a.ts', lines(6));
+  audit(repo);
+  assert.deepEqual(readdirSync(state).filter((f) => f.startsWith('snapshot.')), ['snapshot.3.index']);
+});
+
+test('a graph nx wrote badly is remembered as failed; one already there is not', () => {
+  const nx = '#!/bin/sh\nfor a in "$@"; do case "$a" in --file=*) printf "{bad" > "${a#--file=}";; esac; done\n';
+  const repo = makeRepo({ 'a.ts': lines(5), 'nx.json': '{}\n', '.gitignore': 'node_modules/\n' });
+  mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
+  writeFileSync(join(repo, 'node_modules', '.bin', 'nx'), nx, { mode: 0o755 });
+  const head = git(repo, 'rev-parse', 'HEAD').slice(0, 12);
+  const state = join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, `graph-${head}.json`), '{other');
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(audit(repo).shared, []);
+  assert.ok(!existsSync(join(state, `graph-${head}.json.failed`)), 'another process wrote that file');
+
+  rmSync(join(state, `graph-${head}.json`));
+  assert.deepEqual(audit(repo).shared, []);
+  assert.ok(existsSync(join(state, `graph-${head}.json.failed`)), 'this process wrote it');
 });
 
 test('paths with spaces and accents are read whole', () => {
@@ -664,17 +733,65 @@ test('sessions are separate', () => {
   turn({ cwd: repo, session_id: 's1' });
   write(repo, 'a.ts', lines(6));
   turn({ cwd: repo, session_id: 's2' });
-  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   assert.deepEqual(hook({ cwd: repo, session_id: 's2' }), {}, 's2 did not change code in its turn');
+  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
 });
 
-test('a turn without a session id is recorded under one key', () => {
-  const repo = makeHookRepo();
-  turn({ cwd: repo });
-  assert.ok(readdirSync(stateOf(repo)).includes('turn-nosession'));
+test('without a session id the hook judges the base diff and turn records nothing', () => {
+  const repo = makeBranchRepo();
+  assert.deepEqual(turn({ cwd: repo }), {});
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('turn-')), 'no record without an id');
+  turn({ cwd: repo, session_id: 's1' });
+  assert.equal(hook({ cwd: repo }).decision, 'block', 'a session record is not used for an id-less Stop');
   assert.deepEqual(hook({ cwd: repo }), {});
+});
+
+test('main moving under the same content stays silent', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, session_id: 's1' });
   write(repo, 'a.ts', lines(6));
-  assert.equal(hook({ cwd: repo }).decision, 'block');
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+  git(repo, 'switch', '-q', 'main');
+  write(repo, 'c.ts', lines(3));
+  git(repo, 'add', 'c.ts');
+  git(repo, 'commit', '-q', '-m', 'main 2');
+  git(repo, 'switch', '-q', 'feat');
+  git(repo, 'merge', '-q', '--no-edit', 'main');
+  assert.equal(audit(repo).base.ref, git(repo, 'rev-parse', 'main'));
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+});
+
+test('a merge conflict on a non-code file does not stop the snapshot', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'notes.md': 'base\n' });
+  git(repo, 'switch', '-q', '-c', 'feat');
+  write(repo, 'notes.md', 'feat\n');
+  git(repo, 'commit', '-q', '-am', 'feat');
+  git(repo, 'switch', '-q', 'main');
+  write(repo, 'notes.md', 'main\n');
+  git(repo, 'commit', '-q', '-am', 'main 2');
+  git(repo, 'switch', '-q', 'feat');
+  assert.equal(spawnSync('git', ['merge', '-q', 'main'], { cwd: repo }).status, 1);
+  assert.match(git(repo, 'status', '--porcelain'), /^UU notes\.md$/m);
+  turn({ cwd: repo, session_id: 's1' });
+  assert.ok(readdirSync(stateOf(repo)).some((f) => f.startsWith('turn-')), 'turn records');
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(audit(repo).files.map((f) => f.path), ['a.ts']);
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+});
+
+test('turn and hook leave the real index alone and no private index behind', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  write(repo, 'a.ts', lines(6));
+  git(repo, 'add', 'a.ts');
+  utimesSync(join(repo, 'b.ts'), 1e9, 1e9);
+  const index = join(repo, '.git', 'index');
+  const before = readFileSync(index).toString('hex');
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'b.ts', lines(6));
+  assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
+  assert.equal(readFileSync(index).toString('hex'), before);
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('snapshot.')), readdirSync(stateOf(repo)).join());
 });
 
 test('no opt-in means silent', () => {
@@ -682,7 +799,7 @@ test('no opt-in means silent', () => {
   assert.deepEqual(turn({ cwd: repo, session_id: 's1' }), {});
   write(repo, 'a.ts', lines(6));
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
-  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('turn-')), 'turn records nothing without opt-in');
+  assert.ok(!existsSync(join(repo, '.git', 'strategic-programming')), 'turn and hook create no state dir without opt-in');
 
   const started = makeRepo();
   run(started, ['start']);
