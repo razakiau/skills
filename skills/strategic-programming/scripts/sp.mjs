@@ -62,6 +62,9 @@ function start() {
   git(['update-ref', anchor, stash], { cwd: top });
   writeFileSync(join(state, 'start.json'), JSON.stringify({ head, stash, at: new Date().toISOString() }) + '\n');
   process.stdout.write(`start: ${head.slice(0, 12)} (${dirty} uncommitted files)\n`);
+  if (existsSync(join(top, 'nx.json'))) {
+    try { nxGraph(top, state, 60_000); } catch { /* audit falls back */ }
+  }
 }
 
 function defaultBranch(top) {
@@ -136,27 +139,42 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
 }
 
-// Workspace globs: `*` matches within one path segment, `**` any depth.
+// Workspace globs: `*` and `?` match within one path segment, `**` any depth. No braces.
 function expand(top, pattern) {
   let dirs = [''];
   for (const seg of pattern.replace(/^\.\//, '').split('/').filter(Boolean)) {
-    const re = new RegExp(`^${seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`);
+    const re = new RegExp(`^${seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')}$`);
     const sub = (dir) => readdirSync(join(top, dir), { withFileTypes: true })
       .filter((e) => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.'))
       .map((e) => (dir ? `${dir}/${e.name}` : e.name));
     const deep = (dir) => [dir, ...sub(dir).flatMap(deep)];
     dirs = dirs.flatMap((dir) => {
       if (seg === '**') return deep(dir);
-      if (!seg.includes('*')) return existsSync(join(top, dir, seg)) ? [dir ? `${dir}/${seg}` : seg] : [];
+      if (!/[*?]/.test(seg)) return existsSync(join(top, dir, seg)) ? [dir ? `${dir}/${seg}` : seg] : [];
       return sub(dir).filter((d) => re.test(d.slice(d.lastIndexOf('/') + 1)));
     });
   }
   return dirs;
 }
 
+// pnpm-workspace.yaml's `packages:` list, read line by line (no YAML parser).
+function pnpmPatterns(top) {
+  let text;
+  try { text = readFileSync(join(top, 'pnpm-workspace.yaml'), 'utf8'); } catch { return []; }
+  const out = [];
+  let inList = false;
+  for (const line of text.split('\n')) {
+    if (/^packages\s*:/.test(line)) { inList = true; continue; }
+    if (inList && /^\S/.test(line)) break;
+    const m = inList && line.match(/^\s*-\s*(['"]?)([^'"#]+?)\1\s*(#.*)?$/);
+    if (m) out.push(m[2]);
+  }
+  return out;
+}
+
 function packageGraph(top) {
   const ws = readJson(join(top, 'package.json'))?.workspaces;
-  const patterns = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : [];
+  const patterns = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : pnpmPatterns(top);
   const excluded = new Set(patterns.filter((p) => p.startsWith('!')).flatMap((p) => expand(top, p.slice(1))));
   const roots = new Set(patterns.filter((p) => !p.startsWith('!')).flatMap((p) => expand(top, p)));
   const pkgs = [...roots].filter((r) => !excluded.has(r))
@@ -171,40 +189,56 @@ function packageGraph(top) {
   }));
 }
 
-function nxGraph(top, state) {
+// The repo's own installed nx only: no npx (it may hit the registry), and a failure
+// is remembered per HEAD so the Stop hook (30 s budget) never pays it twice.
+// `start` builds it with the larger budget: a cold graph of a large monorepo took 26 s.
+function nxGraph(top, state, timeout = 20_000) {
+  const bin = join(top, 'node_modules', '.bin', 'nx');
+  if (!existsSync(bin)) return null;
   const head = tryGit(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: top })?.slice(0, 12) ?? 'none';
   const file = join(state, `graph-${head}.json`);
+  const failed = `${file}.failed`;
+  if (existsSync(failed)) return null;
   if (!existsSync(file)) {
+    for (const f of readdirSync(state)) if (f.startsWith('graph-')) rmSync(join(state, f), { force: true });
     try {
-      // --no: use the repo's own nx, never download one.
-      execFileSync('npx', ['--no', 'nx', 'graph', `--file=${file}`], { cwd: top, stdio: 'ignore', timeout: 60_000 });
-    } catch { /* falls back below */ }
+      execFileSync(bin, ['graph', `--file=${file}`], { cwd: top, stdio: 'ignore', timeout });
+    } catch { /* checked below */ }
   }
   const graph = readJson(file)?.graph;
   if (!graph?.nodes || !graph?.dependencies) {
     rmSync(file, { force: true });
+    writeFileSync(failed, '');
     return null;
   }
   return Object.entries(graph.nodes).map(([name, node]) => ({
     name,
-    root: (node.data?.root ?? '').replace(/^\.\/?|\/$/g, ''),
+    root: String(node.data?.root ?? '').replace(/^\.(\/|$)|\/$/g, ''),
+    // An e2e project depends on the app it tests; that does not make the app shared.
+    e2e: node.type === 'e2e',
     deps: (graph.dependencies[name] ?? []).map((d) => d.target).filter((t) => t in graph.nodes),
   }));
 }
 
 // Names of the shared projects (two or more other projects depend on them) that own any of these paths.
+// A graph it cannot read gives [] and the report still prints.
 function sharedProjects({ top, state }, paths) {
   if (!paths.length) return [];
-  const projects = (existsSync(join(top, 'nx.json')) && nxGraph(top, state)) || packageGraph(top);
-  const dependents = new Map();
-  for (const p of projects) {
-    for (const d of new Set(p.deps)) if (d !== p.name) dependents.set(d, (dependents.get(d) ?? 0) + 1);
+  try {
+    const projects = (existsSync(join(top, 'nx.json')) && nxGraph(top, state)) || packageGraph(top);
+    const dependents = new Map();
+    for (const p of projects) {
+      if (p.e2e) continue;
+      for (const d of new Set(p.deps)) if (d !== p.name) dependents.set(d, (dependents.get(d) ?? 0) + 1);
+    }
+    const owner = (path) => projects
+      .filter((p) => !p.root || path === p.root || path.startsWith(`${p.root}/`))
+      .sort((a, b) => b.root.length - a.root.length)[0];
+    const names = paths.map(owner).filter((p) => p && (dependents.get(p.name) ?? 0) >= 2).map((p) => p.name);
+    return [...new Set(names)].sort();
+  } catch {
+    return [];
   }
-  const owner = (path) => projects
-    .filter((p) => !p.root || path === p.root || path.startsWith(`${p.root}/`))
-    .sort((a, b) => b.root.length - a.root.length)[0];
-  const names = paths.map(owner).filter((p) => p && (dependents.get(p.name) ?? 0) >= 2).map((p) => p.name);
-  return [...new Set(names)].sort();
 }
 
 function audit(args) {

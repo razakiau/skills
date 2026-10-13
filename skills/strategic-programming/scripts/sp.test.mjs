@@ -262,31 +262,34 @@ test('start in a repo with no commits, then audit reports', () => {
   assert.ok(r.stdout.includes('A a.ts +2 -0\n'), r.stdout);
 });
 
-function makeWorkspace(workspaces) {
+function makeWorkspace(workspaces, extra = {}) {
   const pkg = (name, deps = {}) => JSON.stringify({ name, version: '1.0.0', ...deps }) + '\n';
   return makeRepo({
-    'package.json': JSON.stringify({ name: 'root', private: true, workspaces }) + '\n',
+    'package.json': JSON.stringify({ name: 'root', private: true, ...(workspaces && { workspaces }) }) + '\n',
     'packages/utils/package.json': pkg('utils'),
     'packages/utils/index.ts': lines(3),
+    'packages/utils-x/package.json': pkg('utils-x'),
+    'packages/utils-x/index.ts': lines(3),
     'packages/solo/package.json': pkg('solo'),
     'packages/solo/index.ts': lines(3),
     'apps/a/package.json': pkg('a', { dependencies: { utils: '*', solo: '*' } }),
     'apps/a/index.ts': lines(3),
     'apps/b/package.json': pkg('b', { devDependencies: { utils: '*' } }),
     'apps/b/index.ts': lines(3),
+    ...extra,
   });
 }
 
 test('a change in a package two projects depend on needs the reviewer', () => {
-  for (const workspaces of [['packages/*', 'apps/*'], { packages: ['packages/*', 'apps/*'] }]) {
-    const repo = makeWorkspace(workspaces);
+  const pnpm = { 'pnpm-workspace.yaml': "packages:\n  - 'packages/*'\n  - \"apps/*\"\n" };
+  for (const [workspaces, extra] of [[['packages/*', 'apps/*']], [{ packages: ['packages/*', 'apps/*'] }], [null, pnpm]]) {
+    const repo = makeWorkspace(workspaces, extra);
     run(repo, ['start']);
     write(repo, 'packages/utils/index.ts', lines(4));
     const a = audit(repo);
-    assert.deepEqual(a.shared, ['utils'], JSON.stringify(workspaces));
+    assert.deepEqual(a.shared, ['utils'], JSON.stringify(workspaces ?? extra));
     assert.equal(a.size, 'full+reviewer');
-    const lines_ = run(repo, ['audit']).stdout.split('\n');
-    assert.deepEqual(lines_.slice(1, 3), ['size: full+reviewer', 'shared: utils']);
+    assert.ok(run(repo, ['audit']).stdout.includes('\nsize: full+reviewer\nshared: utils\n'));
   }
 });
 
@@ -297,5 +300,29 @@ test('a package one project depends on is not shared', () => {
   const a = audit(repo);
   assert.deepEqual(a.shared, []);
   assert.equal(a.size, 'small');
-  assert.equal(run(repo, ['audit']).stdout.split('\n')[2], 'shared: none');
+  assert.ok(run(repo, ['audit']).stdout.includes('\nshared: none\n'));
+});
+
+test('a file belongs to its own package, not one whose name it starts with', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*']);
+  run(repo, ['start']);
+  write(repo, 'packages/utils-x/index.ts', lines(4));
+  assert.deepEqual(audit(repo).shared, []);
+});
+
+test('an excluded workspace is not a project', () => {
+  const repo = makeWorkspace(['packages/*', '!packages/utils', 'apps/*']);
+  run(repo, ['start']);
+  write(repo, 'packages/utils/index.ts', lines(4));
+  assert.deepEqual(audit(repo).shared, []);
+});
+
+test('a workspace list it cannot read still gives the report', () => {
+  const repo = makeWorkspace([42, 'packages/*', 'apps/*']);
+  run(repo, ['start']);
+  write(repo, 'packages/utils/index.ts', lines(4));
+  const r = run(repo, ['audit']);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /^base: start /);
+  assert.ok(r.stdout.includes('\nshared: none\n'), r.stdout);
 });
