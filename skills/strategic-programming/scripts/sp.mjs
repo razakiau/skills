@@ -505,9 +505,65 @@ function buildReport(paths, tree = codeSnapshot(paths)) {
   return { report, unmeasured, tree };
 }
 
+const JSCPD = 'jscpd@5.4.1';
+const DUP_TIMEOUT = 120_000;
+
+// New duplicate blocks touching a changed (A/M/R) non-test code file, from jscpd's own baseline:
+// `--baseline-from-ref <base>` scans the base's tree with the same options and marks each clone of
+// the working tree `isNew` when the base had no such clone. The whole repo is scanned (code files
+// only, .gitignore respected) so a copy of an unchanged file is found; the report is then cut to
+// clones naming a changed file. Never `--changed`/`--update-baseline`: they write in the repo root.
+// Returns `{ duplicates, why }`: duplicates null and a reason when not measured.
+function readDuplicates({ top, state }, report) {
+  const changed = new Set(report.files.filter((f) => !f.test && f.status !== 'D').map((f) => f.path));
+  if (!changed.size) return { duplicates: { count: 0, clones: [] }, why: null };
+  let base = report.base.ref;
+  // jscpd takes a commit, not a tree: the empty-tree root gets a parentless commit of it.
+  if (tryGit(['cat-file', '-t', base], { cwd: top }) === 'tree') {
+    base = git(['commit-tree', base, '-m', 'strategic-programming dup base'], { cwd: top }).trim();
+  }
+  const out = join(state, 'dup');
+  rmSync(out, { recursive: true, force: true });
+  const exts = [...CODE_EXT].join(',');
+  const args = ['-y', JSCPD, '--baseline-from-ref', base, '--pattern', `**/*.{${exts}}`,
+    '--ignore', '**/node_modules/**,**/.git/**', '-r', 'json', '-o', out, '--report-name', 'report', '-s', '--no-tips', '.'];
+  try {
+    execFileSync('npx', args, { cwd: top, stdio: ['ignore', 'pipe', 'pipe'], timeout: DUP_TIMEOUT, maxBuffer: 1 << 26, env: { ...process.env, JSCPD_NO_TIPS: '1' } });
+  } catch (err) {
+    if (err.code === 'ENOENT') return { duplicates: null, why: 'npx not found' };
+    if (err.signal || err.code === 'ETIMEDOUT') return { duplicates: null, why: `jscpd timed out after ${DUP_TIMEOUT / 1000} s` };
+    const msg = String(err.stderr ?? '').split('\n').find((l) => l.trim()) ?? `exit ${err.status}`;
+    return { duplicates: null, why: `jscpd failed: ${msg.trim().slice(0, 160)}` };
+  }
+  const json = readJson(join(out, 'report.json'));
+  if (!Array.isArray(json?.duplicates)) return { duplicates: null, why: 'jscpd report unreadable' };
+  const loc = (f) => ({ path: String(f?.name ?? '').replace(/^\.\//, ''), start: f?.start, end: f?.end });
+  const clones = json.duplicates
+    .filter((d) => d.isNew === true)
+    .map((d) => ({ a: loc(d.firstFile), b: loc(d.secondFile), lines: d.lines }))
+    .filter((c) => changed.has(c.a.path) || changed.has(c.b.path));
+  return { duplicates: { count: clones.length, clones }, why: null };
+}
+
+function dupLine(dup, why) {
+  if (why) return `duplicates: not measured (${why})`;
+  if (!dup) return 'duplicates: run audit --dup';
+  if (!dup.count) return 'duplicates: none';
+  const at = (l) => `${l.path}:${l.start}-${l.end}`;
+  const shown = dup.clones.slice(0, 5).map((c) => `${at(c.a)} ~ ${at(c.b)}`);
+  return `duplicates: ${dup.count} new (${shown.join('; ')}${dup.count > 5 ? '; …' : ''})`;
+}
+
 function audit(args) {
-  const { report, unmeasured } = buildReport(needRepo());
-  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : formatText(report, unmeasured));
+  const paths = needRepo();
+  const { report, unmeasured } = buildReport(paths);
+  let why = null;
+  if (args.includes('--dup')) {
+    try { ({ duplicates: report.duplicates, why } = readDuplicates(paths, report)); }
+    catch (err) { why = String(err.message).split('\n')[0].slice(0, 160); }
+  }
+  process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n'
+    : `${formatText(report, unmeasured)}${dupLine(report.duplicates, why)}\n`);
 }
 
 // Identifies the changed code and test content: the measured paths with their status and

@@ -142,6 +142,51 @@ test('an empty repo audits from the empty tree as root', () => {
   assert.deepEqual(a.newFiles, ['a.ts']);
 });
 
+test('duplicates wait for --dup', () => {
+  const repo = makeRepo();
+  write(repo, 'a.ts', lines(6));
+  const r = run(repo, ['audit']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.split('\n').includes('duplicates: run audit --dup'), r.stdout);
+  assert.equal(audit(repo).duplicates, null);
+});
+
+// git alone on PATH: no npx, so nothing can reach the network.
+function noNpxEnv() {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'sp-bin-')));
+  const gitBin = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  execFileSync('ln', ['-s', gitBin, join(bin, 'git')]);
+  return { ...process.env, PATH: bin };
+}
+
+test('audit --dup without npx says duplicates are not measured and still reports', () => {
+  const repo = makeRepo();
+  write(repo, 'a.ts', lines(6));
+  write(repo, 'b.ts', lines(3));
+  const env = noNpxEnv();
+  const text = spawnSync(process.execPath, [SP, 'audit', '--dup'], { cwd: repo, encoding: 'utf8', env });
+  assert.equal(text.status, 0, text.stderr);
+  const out = text.stdout.split('\n');
+  assert.match(out[0], /^base: merge-base /);
+  assert.ok(out.includes('A b.ts +3 -0'), text.stdout);
+  assert.ok(out.includes('duplicates: not measured (npx not found)'), text.stdout);
+  const json = spawnSync(process.execPath, [SP, 'audit', '--dup', '--json'], { cwd: repo, encoding: 'utf8', env });
+  assert.equal(json.status, 0, json.stderr);
+  const a = JSON.parse(json.stdout);
+  assert.equal(a.duplicates, null);
+  assert.deepEqual(a.newFiles, ['b.ts']);
+  assert.equal(git(repo, 'status', '--porcelain'), 'M a.ts\n?? b.ts');
+});
+
+test('audit --dup with no changed code needs no jscpd', () => {
+  const repo = makeRepo();
+  write(repo, 'a.test.ts', lines(6, 't'));
+  write(repo, 'README.md', 'docs\n');
+  const r = spawnSync(process.execPath, [SP, 'audit', '--dup', '--json'], { cwd: repo, encoding: 'utf8', env: noNpxEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).duplicates, { count: 0, clones: [] });
+});
+
 test('audit outside a git repository says so and exits 0', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'sp-norepo-')));
   const r = run(dir, ['audit']);
