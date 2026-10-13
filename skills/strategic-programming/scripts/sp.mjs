@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const CODE_EXT = new Set('ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte'.split(' '));
@@ -44,7 +44,7 @@ function snapshotTree({ top, state }) {
 }
 
 function emptyTree(top) {
-  return git(['hash-object', '-t', 'tree', '--stdin'], { cwd: top, input: '', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+  return git(['hash-object', '-w', '-t', 'tree', '--stdin'], { cwd: top, input: '', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
 }
 
 function start() {
@@ -132,6 +132,81 @@ function readDiff(top, base, tree) {
   return files.filter((f) => !gen.has(f.path));
 }
 
+function readJson(path) {
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
+}
+
+// Workspace globs: `*` matches within one path segment, `**` any depth.
+function expand(top, pattern) {
+  let dirs = [''];
+  for (const seg of pattern.replace(/^\.\//, '').split('/').filter(Boolean)) {
+    const re = new RegExp(`^${seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`);
+    const sub = (dir) => readdirSync(join(top, dir), { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== 'node_modules' && !e.name.startsWith('.'))
+      .map((e) => (dir ? `${dir}/${e.name}` : e.name));
+    const deep = (dir) => [dir, ...sub(dir).flatMap(deep)];
+    dirs = dirs.flatMap((dir) => {
+      if (seg === '**') return deep(dir);
+      if (!seg.includes('*')) return existsSync(join(top, dir, seg)) ? [dir ? `${dir}/${seg}` : seg] : [];
+      return sub(dir).filter((d) => re.test(d.slice(d.lastIndexOf('/') + 1)));
+    });
+  }
+  return dirs;
+}
+
+function packageGraph(top) {
+  const ws = readJson(join(top, 'package.json'))?.workspaces;
+  const patterns = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : [];
+  const excluded = new Set(patterns.filter((p) => p.startsWith('!')).flatMap((p) => expand(top, p.slice(1))));
+  const roots = new Set(patterns.filter((p) => !p.startsWith('!')).flatMap((p) => expand(top, p)));
+  const pkgs = [...roots].filter((r) => !excluded.has(r))
+    .map((root) => ({ root, pkg: readJson(join(top, root, 'package.json')) }))
+    .filter(({ pkg }) => typeof pkg?.name === 'string');
+  const names = new Set(pkgs.map(({ pkg }) => pkg.name));
+  return pkgs.map(({ root, pkg }) => ({
+    name: pkg.name,
+    root,
+    deps: ['dependencies', 'devDependencies', 'peerDependencies']
+      .flatMap((k) => Object.keys(pkg[k] ?? {})).filter((d) => names.has(d)),
+  }));
+}
+
+function nxGraph(top, state) {
+  const head = tryGit(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: top })?.slice(0, 12) ?? 'none';
+  const file = join(state, `graph-${head}.json`);
+  if (!existsSync(file)) {
+    try {
+      // --no: use the repo's own nx, never download one.
+      execFileSync('npx', ['--no', 'nx', 'graph', `--file=${file}`], { cwd: top, stdio: 'ignore', timeout: 60_000 });
+    } catch { /* falls back below */ }
+  }
+  const graph = readJson(file)?.graph;
+  if (!graph?.nodes || !graph?.dependencies) {
+    rmSync(file, { force: true });
+    return null;
+  }
+  return Object.entries(graph.nodes).map(([name, node]) => ({
+    name,
+    root: (node.data?.root ?? '').replace(/^\.\/?|\/$/g, ''),
+    deps: (graph.dependencies[name] ?? []).map((d) => d.target).filter((t) => t in graph.nodes),
+  }));
+}
+
+// Names of the shared projects (two or more other projects depend on them) that own any of these paths.
+function sharedProjects({ top, state }, paths) {
+  if (!paths.length) return [];
+  const projects = (existsSync(join(top, 'nx.json')) && nxGraph(top, state)) || packageGraph(top);
+  const dependents = new Map();
+  for (const p of projects) {
+    for (const d of new Set(p.deps)) if (d !== p.name) dependents.set(d, (dependents.get(d) ?? 0) + 1);
+  }
+  const owner = (path) => projects
+    .filter((p) => !p.root || path === p.root || path.startsWith(`${p.root}/`))
+    .sort((a, b) => b.root.length - a.root.length)[0];
+  const names = paths.map(owner).filter((p) => p && (dependents.get(p.name) ?? 0) >= 2).map((p) => p.name);
+  return [...new Set(names)].sort();
+}
+
 function audit(args) {
   const paths = repoPaths();
   const base = findBase(paths);
@@ -139,15 +214,16 @@ function audit(args) {
   const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
   const code = files.filter((f) => !f.test);
   const newFiles = code.filter((f) => f.status === 'A').map((f) => f.path);
+  const shared = sharedProjects(paths, code.map((f) => f.path));
   const report = {
     base,
-    size: code.length <= 1 && newFiles.length === 0 ? 'small' : 'full',
+    size: shared.length ? 'full+reviewer' : code.length <= 1 && newFiles.length === 0 ? 'small' : 'full',
     code: sum(code),
     tests: sum(files.filter((f) => f.test)),
     files,
     newFiles,
     exports: [],
-    shared: [],
+    shared,
     testBeside: [],
     unlistedHome: null,
     duplicates: null,
@@ -159,6 +235,7 @@ function formatText(r) {
   return [
     `base: ${r.base.kind} ${r.base.ref.slice(0, 12)}${r.base.note ? ` (${r.base.note})` : ''}`,
     `size: ${r.size}`,
+    `shared: ${r.shared.length ? r.shared.join(', ') : 'none'}`,
     `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
     ...r.files.map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
     `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,

@@ -249,3 +249,53 @@ test('two code files or a new code file is full', () => {
   assert.deepEqual(a.newFiles, ['c.go']);
   assert.equal(a.size, 'full');
 });
+
+test('start in a repo with no commits, then audit reports', () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sp-test-')));
+  git(repo, 'init', '-q', '-b', 'main');
+  const s = run(repo, ['start']);
+  assert.deepEqual([s.code, s.stderr], [0, '']);
+  write(repo, 'a.ts', lines(2));
+  const r = run(repo, ['audit']);
+  assert.deepEqual([r.code, r.stderr], [0, '']);
+  assert.match(r.stdout, /^base: start [0-9a-f]{12}\n/);
+  assert.ok(r.stdout.includes('A a.ts +2 -0\n'), r.stdout);
+});
+
+function makeWorkspace(workspaces) {
+  const pkg = (name, deps = {}) => JSON.stringify({ name, version: '1.0.0', ...deps }) + '\n';
+  return makeRepo({
+    'package.json': JSON.stringify({ name: 'root', private: true, workspaces }) + '\n',
+    'packages/utils/package.json': pkg('utils'),
+    'packages/utils/index.ts': lines(3),
+    'packages/solo/package.json': pkg('solo'),
+    'packages/solo/index.ts': lines(3),
+    'apps/a/package.json': pkg('a', { dependencies: { utils: '*', solo: '*' } }),
+    'apps/a/index.ts': lines(3),
+    'apps/b/package.json': pkg('b', { devDependencies: { utils: '*' } }),
+    'apps/b/index.ts': lines(3),
+  });
+}
+
+test('a change in a package two projects depend on needs the reviewer', () => {
+  for (const workspaces of [['packages/*', 'apps/*'], { packages: ['packages/*', 'apps/*'] }]) {
+    const repo = makeWorkspace(workspaces);
+    run(repo, ['start']);
+    write(repo, 'packages/utils/index.ts', lines(4));
+    const a = audit(repo);
+    assert.deepEqual(a.shared, ['utils'], JSON.stringify(workspaces));
+    assert.equal(a.size, 'full+reviewer');
+    const lines_ = run(repo, ['audit']).stdout.split('\n');
+    assert.deepEqual(lines_.slice(1, 3), ['size: full+reviewer', 'shared: utils']);
+  }
+});
+
+test('a package one project depends on is not shared', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*']);
+  run(repo, ['start']);
+  write(repo, 'packages/solo/index.ts', lines(4));
+  const a = audit(repo);
+  assert.deepEqual(a.shared, []);
+  assert.equal(a.size, 'small');
+  assert.equal(run(repo, ['audit']).stdout.split('\n')[2], 'shared: none');
+});
