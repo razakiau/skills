@@ -412,3 +412,118 @@ test('no code map means unlisted home is not measured', () => {
   assert.ok(text.includes('\ncode map: none\n'), text);
   assert.ok(!text.includes('unlisted home'), text);
 });
+
+test('an edited export is not new', () => {
+  const repo = makeRepo({ 'a.ts': 'export function foo(a) {}\n' + lines(3) });
+  run(repo, ['start']);
+  write(repo, 'a.ts', 'export function foo(a, b) {}\n' + lines(3));
+  const a = audit(repo);
+  assert.deepEqual(a.exports, []);
+  assert.equal(a.size, 'small');
+});
+
+test('an export moved into another existing file is not new', () => {
+  const repo = makeRepo({ 'a.ts': lines(3) + 'export function f() {}\n', 'b.ts': lines(3) });
+  run(repo, ['start']);
+  write(repo, 'a.ts', lines(3));
+  write(repo, 'b.ts', lines(3) + 'export function f() {}\n');
+  assert.deepEqual(audit(repo).exports, []);
+});
+
+test('an added line starting with ++ is not a file header', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  write(repo, 'a.ts', lines(5) + '++ x\nexport const later = 1;\n');
+  assert.deepEqual(audit(repo).exports, [{ path: 'a.ts', name: 'later' }]);
+});
+
+test('export forms: declare, const enum, export * as, and no keyword taken for a name', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  write(repo, 'a.ts', lines(5) + [
+    'export default class extends Base {}',
+    'export const enum Dir {}',
+    "export * as ns from './x';",
+    'export declare function d(): void;',
+    'export class C implements I {}',
+  ].join('\n') + '\n');
+  assert.deepEqual(audit(repo).exports.map((e) => e.name), ['Dir', 'ns', 'd', 'C']);
+});
+
+// Workspace where packages/lib is shared too (apps a and b both depend on it).
+function makeLibWorkspace(map) {
+  const pkg = (name, deps = {}) => JSON.stringify({ name, version: '1.0.0', ...deps }) + '\n';
+  return makeWorkspace(['packages/*', 'apps/*'], {
+    'packages/lib/package.json': pkg('lib'),
+    'packages/lib/index.ts': lines(3),
+    'apps/a/package.json': pkg('a', { dependencies: { utils: '*', solo: '*', lib: '*' } }),
+    'apps/b/package.json': pkg('b', { devDependencies: { utils: '*', lib: '*' } }),
+    '.agents/code-map.md': map,
+  });
+}
+
+test('map paths: * stays in a segment, **/ matches zero or more directories, a leading / is ignored', () => {
+  const repo = makeLibWorkspace('| Concept | Path |\n|---|---|\n| src | `packages/*/src` |\n| libs | `/packages/**/lib` |\n');
+  run(repo, ['start']);
+  for (const p of ['packages/utils/src/x.ts', 'packages/utils/lib/x.ts', 'packages/lib/x.ts', 'packages/utils/other/x.ts']) {
+    write(repo, p, lines(2));
+  }
+  assert.deepEqual(audit(repo).unlistedHome, ['packages/utils/other/x.ts']);
+});
+
+test('a map path covers its own directory, not one whose name it starts with', () => {
+  const repo = makeLibWorkspace('| Concept | Path |\n|---|---|\n| js | packages/utils/src/lib/js |\n');
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/lib/js/y.ts', lines(2));
+  write(repo, 'packages/utils/src/lib/jsx/y.ts', lines(2));
+  assert.deepEqual(audit(repo).unlistedHome, ['packages/utils/src/lib/jsx/y.ts']);
+});
+
+test('a fenced example table is not the code map', () => {
+  const map = [
+    '# Code map', '', 'Example:', '', '```md',
+    '| Concept | Path |', '|---|---|', '| x | packages/utils/src/other |',
+    '```', '', '~~~',
+    '| Concept | Path |', '|---|---|', '| y | packages/utils/src/other |',
+    '~~~', '',
+    '| Concept | path |', '| :- | -: |', '| dates | packages/utils/src/lib |', '',
+  ].join('\n');
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': map });
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/other/x.ts', lines(2));
+  write(repo, 'packages/utils/src/lib/y.ts', lines(2));
+  assert.deepEqual(audit(repo).unlistedHome, ['packages/utils/src/other/x.ts']);
+});
+
+test('a code map without a Path column says so', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*'], {
+    '.agents/code-map.md': '| Concept | Home |\n|---|---|\n| dates | utils |\n',
+  });
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/other/x.ts', lines(2));
+  assert.equal(audit(repo).unlistedHome, null);
+  const text = run(repo, ['audit']).stdout;
+  assert.ok(text.includes('\ncode map: no Path column\n'), text);
+  assert.ok(!text.includes('code map: none'), text);
+});
+
+test('a graph it cannot read leaves unlisted home not measured', () => {
+  // 42 in the workspace list makes packageGraph throw (42.startsWith).
+  const repo = makeWorkspace([42, 'packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/other/x.ts', lines(2));
+  assert.equal(audit(repo).unlistedHome, null);
+  const r = run(repo, ['audit']);
+  assert.equal(r.code, 0);
+  assert.ok(r.stdout.includes('\nunlisted home: not measured (graph)\n'), r.stdout);
+});
+
+test('a modified file or a new test file in a shared package outside the map is not flagged', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  run(repo, ['start']);
+  write(repo, 'packages/utils/index.ts', lines(4));
+  write(repo, 'packages/utils/src/other/x.test.ts', lines(2));
+  const a = audit(repo);
+  assert.deepEqual(a.shared, ['utils']);
+  assert.deepEqual(a.unlistedHome, []);
+});
