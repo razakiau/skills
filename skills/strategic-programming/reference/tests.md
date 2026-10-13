@@ -21,7 +21,7 @@ An unanswered question means the test protects nothing new: the change ships wit
 
 ## The junk list
 
-Rewrite each of these against the real boundary, or drop it:
+In every test this change adds or edits, rewrite each of these against the real boundary, or drop it:
 
 - assertion-free probes, and assertions that compare a value with itself;
 - expected values computed by the code under test;
@@ -29,13 +29,13 @@ Rewrite each of these against the real boundary, or drop it:
 - greps of source text, imports or exact strings;
 - call-shape assertions (called with these arguments, this many times) where the result is observable;
 - mocks that supply the behaviour the test then asserts;
-- fixtures that fabricate what the owner should produce (ordering, receipts, persisted state the code never writes);
+- fixtures that fabricate what the owner should produce (ordering, receipts, persisted state the code never writes). A named static builder for a state the code can reach (an order whose customer was deleted) is the code map's precedent, not fabrication;
 - negative controls that pass on an unrelated guard;
 - names that promise behaviour the inputs never exercise;
 - test-only exports, globals and wrappers.
 
 ## Replace, don't layer
 
-A test at a deeper interface makes the shallower tests of the same contract redundant: the change deletes them in the same diff. Report the tests removed and the contract that now owns them. A behaviour-preserving refactor keeps its tests green unchanged; when one breaks, it was testing the implementation, and it moves to the boundary.
+A test at a deeper interface replaces a shallower test of the same contract when every assertion the shallower one makes is also made by the deeper one, which fails on the same regression. Delete those in the same diff and report each one removed with the test that now owns it. A behaviour-preserving refactor keeps its tests green unchanged; when one breaks, it was testing the implementation, and it moves to the boundary.
 
 Adapted from openclaw `test-audit` (MIT) and Matt Pocock's `codebase-design`.

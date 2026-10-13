@@ -1,6 +1,6 @@
 ---
 name: strategic-programming
-description: Use when fixing a bug, adding a feature, or refactoring code in a repo. Before writing, a placement note names the owning layer, the precedent and every call site, and chooses tactical or strategic out loud; after, a bundled audit script measures the diff and every flag gets an answer. Doc-only and config-only changes go ahead without it.
+description: Use when fixing a bug, adding a feature or refactoring code, or when the strategic-programming audit blocks your turn. Before writing, a placement note names the owning layer, the precedent and the call sites, and states tactical or strategic. After, a bundled audit script measures the diff and each flag gets an answer. Doc- and config-only changes skip it.
 license: MIT
 metadata:
   version: "1.0.0"
@@ -15,72 +15,77 @@ A change lands in the **owning layer** of its concept, shaped like the **precede
 
 ## Sizes
 
-The script decides the size; you predict it from your plan before writing.
+The script decides the size. You predict it from your plan and state it before writing; when `audit` reports a bigger size, the bigger size applies from that moment: write the full note then, and run the steps that size adds.
 
 | Size | The change | Before | After |
 | --- | --- | --- | --- |
-| Small | exactly one non-test code file, no new code file, no new export, outside any shared package (test files beside it are fine) | one line: `owner: <layer>, precedent: <file:symbol>` | `audit`, answer its flags |
-| Full | anything else | the five-part placement note | `audit` and `audit --dup`, answer every flag, the reading checks |
+| Small | at most one non-test code file, no new code file, no new export, no shared package (test files anywhere are fine) | `start`, then one line: `owner: <layer>, precedent: <file:symbol>` | `audit`, answer its flags |
+| Full | anything else | `start`, then the five-part placement note | `audit --dup`, answer every flag, the reading checks |
 | Full + reviewer | Full, and it touches a shared package (or the owner asks) | as Full | as Full, plus a fresh reviewer |
 
-A *shared package* is a workspace project that two or more other projects depend on, read from the dependency graph (nx, or `package.json` / `pnpm-workspace.yaml` workspaces). A repo with no workspace has none.
+Only code files count: the extensions `ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte`, generated files excluded. JSON, i18n catalogues, YAML and Markdown never count toward the size.
 
-When `audit` reports a bigger size than you predicted, the bigger size applies from that moment: write the full note then, and run the steps that size adds.
+A *shared package* is a workspace project that two or more other projects depend on, read from the dependency graph (nx, or `package.json` / `pnpm-workspace.yaml` workspaces). A repo with no workspace has none, and a folder inside one app (`apps/backend/src/libs`) belongs to that app whatever its name. When the script cannot read the graph it prints `shared: not measured (graph)`, and the size is at least Full.
 
 ## Steps
 
 ### 1. Record the start
 
-Run `node <skill dir>/scripts/sp.mjs start` once per change, before writing any code. It prints `start: <sha> (<n> uncommitted files)` and records that point, uncommitted work included, so `audit` measures this change only. Done: the `start:` line is printed.
+Run `node <skill dir>/scripts/sp.mjs start` before your first edit of this change, at every size. It prints `start: <sha> (<n> uncommitted files)` and records that point, uncommitted work included, so `audit` measures this change only. If you have already edited code for this change, leave `start` for the next change: `audit` then measures from the merge base (or an earlier `start`), and you say so. If you cannot run the script (a read-only session, or you were told not to), say so; `audit` falls back to the merge base. Outside git, `start` prints `sp: not a git repository`: skip the script steps, say so, and still run step 6's reading checks. Done: the `start:` line is printed, or you said why not.
 
 ### 2. Read the code map
 
-Read `.agents/code-map.md` at the repo root: concept rows (concept, home, path, precedent) and the **Invariants**, rules no graph shows. With no map, a Full change drafts one with [reference/code-map.md](reference/code-map.md) and the owner reviews it before it is saved. Done: you know which row, if any, covers the concept, and every invariant that applies.
+Read `.agents/code-map.md` at the repo top: concept rows (concept, home, path, precedent) and the **Invariants**, rules no graph shows. A row's precedent can be stale: open its file and find the symbol before you copy it. When it is missing, say so in the note, use the nearest real code as the precedent, and propose the row fix. With no map, a Full change drafts one with [reference/code-map.md](reference/code-map.md) and the owner reviews it before it is saved. Done: you know which row, if any, covers the concept, its precedent exists or you said it does not, and you know every invariant that applies.
 
 ### 3. Write the placement note
 
-In chat, before any code. A Small change writes the one line from the table. Full writes all five parts:
+In chat, before any code: state the predicted size, then the note for that size. A Small change writes the one line from the table. Full writes all five parts.
 
-1. **Owning layer**, with evidence: the code map row first, then the dependency graph (`nx graph --file=<tmp file>`, `graphify query "<concept>"`, or package manifests plus an import search). Rules placed in a shared package reach every consumer.
+For a bug, first locate the line that produces the symptom, by reproducing it or reading to it, and say whether the code matches the report. When it does not (the code would throw where the report says it prints), ask the owner before going on.
+
+1. **Owning layer**, with evidence: the code map row first, then the dependency graph (`nx graph --file=<tmp file>`, `graphify query "<concept>"`, or package manifests plus an import search). Rules placed in a shared package reach every consumer. A concept can span layers: a fact derived in the domain, its mapping in a lib, its label in presentation. Name the owning layer of each piece the change touches; the invariants decide (no i18n in the domain, for example).
 2. **Precedent**: the nearest existing code that solves the same kind of problem, as file and symbol. Search for the concept's name, then its siblings (other getters, other mappers of the same entity). The change copies the precedent's shape: its file, naming and signature style.
-3. **Call sites**: every place in the repo with the same bug or need, found by search. List them all; a type checker misses many (loose null checks, `any`, dynamic access).
-4. **Tactical or strategic**, with the cost of each. Strategic is the default. Tactical states its reason (urgency, a risky shared layer) and one line naming the root-cause fix for later.
+3. **Call sites**: every place in the repo with the same bug or need, found by search. List them all, or name the areas you could not search (search covered only the open workspace, a tool was missing). A type checker misses many (loose null checks, `any`, dynamic access).
+4. **Tactical or strategic**, with the cost of each. Strategic is the default. Tactical states its reason (urgency, a risky shared layer) and one line naming the root-cause fix for later; the tactical tornado makes the same fix with neither.
 5. **Tests**: for each test you plan, the behaviour it protects, the credible regression that fails it, and why the existing tests miss that regression. The gate and its rules are in [reference/tests.md](reference/tests.md); read it before the first test of the change.
 
-Done: parts 1 to 3 each name a file, a symbol or a search result; part 4 names one choice; part 5 answers the three questions for every planned test.
+Done: the predicted size is stated; parts 1 to 3 each name a file, a symbol or a search result; part 4 names one choice; part 5 answers the three questions for every planned test.
 
 ### 4. Ask the owner when the note says so
 
 Stop and ask, showing the note, when:
 
+- the code does not match the reported symptom;
 - the change lands in a shared package;
 - it needs a new file with no precedent;
-- the strategic fix is much bigger than the tactical one.
+- the strategic fix is much bigger than the tactical one: at least twice the files, or a shared package the tactical fix leaves alone. Count files, not net lines: a strategic fix that removes a copy can touch more files and still remove more lines than it adds.
 
 Done: no condition holds, or the owner answered.
 
 ### 5. Write the change
 
-Extend the precedent in the owning layer and fix every call site from part 3. With a TDD skill loaded, the order is: the first failing test is the bug's regression, written as an extension of the owning test at the owning boundary; the gate in part 5 governs every test after that one. Done: the code and its tests are written and the tests pass.
+Extend the precedent in the owning layer and fix every call site from part 3. With a TDD skill loaded: for a bug, the first failing test is its regression, written as an extension of the owning test at the owning boundary (it passes the gate by construction); every other test, and a feature's first test, passes the gate in part 5. Done: the code and its tests are written and the tests pass.
 
 ### 6. Audit and answer every flag
 
-Run `node <skill dir>/scripts/sp.mjs audit`; for Full, also `node <skill dir>/scripts/sp.mjs audit --dup`. It prints, line by line:
+Run `node <skill dir>/scripts/sp.mjs audit`; for Full, run `audit --dup` instead (the same report plus new duplicates). It prints, line by line:
 
 ```
 base: start <sha>          (or merge-base / root, when no start was recorded)
 size: small | full | full+reviewer
-shared: <projects> | none
+shared: <projects> | none | not measured (graph)
 code: +A -R  tests: +A -R
 <status> <path> +A -R      (one line per code file: A added, M modified, R renamed, D deleted)
-new files: ...
-exports: <names> | none | not measured (<why>)
+new files: <paths> | none
+exports: <names> | none | not measured (<why>)   (read in TS/JS; other languages add: ; not measured (py))
 tests beside: <new test> (next to <existing test>) | none
 unlisted home: <paths> | none     (or: code map: none / code map: no Path column / unlisted home: not measured (graph))
 duplicates: run audit --dup | none | <n> new (<a> ~ <b>) | not measured (<why>)
 ```
 
-A `base:` other than `start` means the numbers include earlier work on the branch: say so, and run `start` at the next change.
+The `base:` sha after `start` is the snapshot's, not the HEAD sha step 1 printed, when there were uncommitted files; `(start point missing)` after it means the recorded start was lost.
+
+A **flag** is any line not ending in `none`: a `size:` above your prediction, each `shared:` project, a `code:` line where added far exceeds removed, each new file, export, tests-beside pair, unlisted home and duplicate, and every `not measured`. `base:`, the per-file lines, `code map: none` and a Small change's `duplicates: run audit --dup` are facts. When the numbers include work from before this change (a `base:` other than `start`, or a `start` left from an earlier change), say so, and run `start` before your next change.
 
 Answer each flag in your reply in one of three ways:
 
@@ -88,17 +93,17 @@ Answer each flag in your reply in one of three ways:
 - **justify** it against the placement note (which part of the note calls for it);
 - for an **unlisted home**: propose a code-map row (the owner approves it) or move the file under a mapped path.
 
-The numbers stand. `+300 -20` asks "why did nothing get replaced?"; a new file asks "why is the precedent's file the wrong home?"; a new export asks "who besides this change calls it?". Answer the question. Lines are a signal to explain: a diff gets smaller by replacing code in the owning layer, and every line that carries behaviour stays.
+The numbers stand. `+300 -20` asks "why did nothing get replaced?"; a new file asks "why is the precedent's file the wrong home?"; a new export asks "who besides this change calls it?". For a feature, "new behaviour; the precedent was extended, nothing duplicates it" is a complete answer. Lines are a signal to explain: a diff gets smaller by replacing code in the owning layer, and every line that carries behaviour stays.
 
-Then run the reading checks in [reference/audit-checks.md](reference/audit-checks.md) on the diff. Done: every flag line has an answer and every reading check has run.
+Then run the reading checks in [reference/audit-checks.md](reference/audit-checks.md) on the diff. Done: each flag has one answer (remove, justify, or row/move) and every reading check has run.
 
 ### 7. Reviewer (Full + reviewer)
 
-Dispatch a fresh subagent with the prompt in [reference/audit-checks.md](reference/audit-checks.md#fresh-reviewer). Answer its findings like flags. Done: its findings are answered, or it came back empty and you said so and did that review yourself.
+Dispatch a fresh subagent with the prompt in [reference/audit-checks.md](reference/audit-checks.md#fresh-reviewer). Answer its findings like flags. Done: findings answered; a `none` is reported as such; a reply with no text means you say so and do the review yourself, without retrying.
 
 ## The end-of-turn hook
 
-In a repo that opted in (a `.agents/code-map.md` at the root, or a recorded `start`), a hook runs at the end of each turn in which you changed non-test code. It may block once, handing you the `audit` output and asking you to answer every flag. Answer them as in step 6 and finish; the same diff does not block twice. A turn with no code change, or the owner's own edits between turns, passes silently.
+The hook runs only in repos with `.agents/code-map.md` at the top; elsewhere step 6 is the only audit. There it speaks only after a turn in which you changed non-test code, and blocks at most once per distinct diff. Its block starts `strategic-programming audit (see the strategic-programming skill):`, then the `audit` lines (at most 40 file lines, no duplicates line). Answer every flag as in step 6 and finish. The owner's own edits between turns pass silently when the turn was recorded; without a turn record (no session id) it judges the whole diff since the base.
 
 ## Out of scope
 

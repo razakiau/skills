@@ -20,7 +20,9 @@ A committed file, read before every code change: where each shared concept lives
 
 **Path** is a comma-separated list of directories or globs relative to the repo root. `*` matches within one path segment, `**` across segments; no braces. A directory covers everything under it. Leave Path empty when the home is not a fixed place ("the sibling controller"); that row guides placement and the script skips it.
 
-`audit` reads the first table whose header has a `Path` column. It flags, under `unlisted home:`, a **new** code file inside a **shared** package that no Path covers. New files in an app's own folders, and edits to existing files, are never flagged this way. Answer the flag with a new row (the owner approves it) or by moving the file under a mapped path.
+`audit` reads the first table whose header has a `Path` column. It flags, under `unlisted home:`, a **new** code file inside a **shared** package that no Path covers. New files in an app's own folders, and edits to existing files, are never flagged this way.
+
+The map is also the opt-in: the end-of-turn hook runs only in a repo with `.agents/code-map.md` at the top.
 
 ## Drafting a map
 

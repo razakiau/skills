@@ -480,7 +480,8 @@ function buildReport(paths, tree = codeSnapshot(paths)) {
   const code = files.filter((f) => !f.test);
   const newFiles = code.filter((f) => f.status === 'A').map((f) => f.path);
   const owners = sharedOwners(paths, code.map((f) => f.path));
-  const shared = [...new Set((owners ?? []).filter(Boolean))].sort();
+  // null: the graph was not read, so no change can be proven outside a shared package.
+  const shared = owners === null ? null : [...new Set(owners.filter(Boolean))].sort();
   const exports = measured('exports', () => readExports(paths.top, base.ref, tree, files), null);
   const codeMap = measured('code map', () => readCodeMap(paths.top), null);
   // Why unlisted home is null, for the text report: no map, no Path column, or no graph.
@@ -489,10 +490,10 @@ function buildReport(paths, tree = codeSnapshot(paths)) {
   const unlistedHome = unmeasured ? null : code
     .filter((f, i) => f.status === 'A' && owners[i] && !codeMap.some((e) => mapCovers(e, f.path)))
     .map((f) => f.path);
-  const small = code.length <= 1 && newFiles.length === 0 && exports?.length === 0;
+  const small = shared !== null && code.length <= 1 && newFiles.length === 0 && exports?.length === 0;
   const report = {
     base,
-    size: shared.length ? 'full+reviewer' : small ? 'small' : 'full',
+    size: shared?.length ? 'full+reviewer' : small ? 'small' : 'full',
     code: sum(code),
     tests: sum(files.filter((f) => f.test)),
     files: files.map(({ from, ...f }) => f),
@@ -657,12 +658,13 @@ function readPayload() {
   }
 }
 
-// The payload's repo, only when it opted in: a code map at the top or a recorded start.
+// The payload's repo, only when it opted in: a code map at the top. A recorded start is not
+// enough, because `start` runs in every repo the skill touches, personal ones included.
 // The state dir is created only then.
 function optedIn(payload) {
   const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd(), { mkdir: false });
   if (!paths) return null;
-  if (!existsSync(join(paths.top, '.agents', 'code-map.md')) && !existsSync(join(paths.state, 'start.json'))) return null;
+  if (!existsSync(join(paths.top, '.agents', 'code-map.md'))) return null;
   mkdirSync(paths.state, { recursive: true });
   return paths;
 }
@@ -726,7 +728,8 @@ function hook() {
     let last = null;
     try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
     if (print === last) return null;
-    const reason = `${formatText(built.report, built.unmeasured, MAX_HOOK_FILES)}\nAnswer every flag above against your `
+    const reason = 'strategic-programming audit (see the strategic-programming skill):\n'
+      + `${formatText(built.report, built.unmeasured, MAX_HOOK_FILES)}\nAnswer every flag above against your `
       + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
       + (built.report.size === 'small' ? '' : ` For a Full change also run \`node "${SELF}" audit --dup\`.`);
     writeFileSync(file, `${print}\n`);
@@ -745,7 +748,7 @@ function formatText(r, unmeasured, maxFiles = Infinity) {
   return [
     `base: ${r.base.kind} ${r.base.ref.slice(0, 12)}${r.base.note ? ` (${r.base.note})` : ''}`,
     `size: ${r.size}`,
-    `shared: ${r.shared.length ? r.shared.join(', ') : 'none'}`,
+    `shared: ${r.shared === null ? 'not measured (graph)' : r.shared.length ? r.shared.join(', ') : 'none'}`,
     `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
     ...r.files.slice(0, maxFiles).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
     ...(r.files.length > maxFiles ? [`… and ${r.files.length - maxFiles} more (run audit for the full list)`] : []),

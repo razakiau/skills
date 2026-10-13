@@ -600,14 +600,17 @@ test('an excluded workspace is not a project', () => {
   assert.deepEqual(audit(repo).shared, []);
 });
 
-test('a workspace list it cannot read still gives the report', () => {
+test('a workspace list it cannot read still gives the report, with shared not measured and the size at least full', () => {
   const repo = makeWorkspace([42, 'packages/*', 'apps/*']);
   run(repo, ['start']);
   write(repo, 'packages/utils/index.ts', lines(4));
   const r = run(repo, ['audit']);
   assert.equal(r.code, 0);
   assert.match(r.stdout, /^base: start /);
-  assert.ok(r.stdout.includes('\nshared: none\n'), r.stdout);
+  assert.ok(r.stdout.includes('\nsize: full\nshared: not measured (graph)\n'), r.stdout);
+  const a = audit(repo);
+  assert.equal(a.shared, null);
+  assert.equal(a.size, 'full', 'a one-file change is not small when the graph was not read');
 });
 
 test('new exports are listed, moved ones are not', () => {
@@ -834,6 +837,7 @@ test('blocks once when code changed, then stays silent on the same diff', () => 
   write(repo, 'a.ts', lines(6));
   const out = hook({ cwd: repo, stop_hook_active: false });
   assert.equal(out.decision, 'block');
+  assert.ok(out.reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nbase: '), out.reason);
   assert.deepEqual(Object.keys(out).sort(), ['decision', 'hookSpecificOutput', 'reason']);
   assert.deepEqual(out.hookSpecificOutput, { hookEventName: 'Stop', decision: 'block', reason: out.reason });
   assert.match(out.reason, /\nsize: small\n/);
@@ -1015,10 +1019,15 @@ test('no opt-in means silent', () => {
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
   assert.ok(!existsSync(join(repo, '.git', 'strategic-programming')), 'turn and hook create no state dir without opt-in');
 
+  // `start` runs in every repo the skill touches; only a committed code map opts a repo in.
   const started = makeRepo();
   run(started, ['start']);
+  assert.deepEqual(turn({ cwd: started, session_id: 's1' }), {});
   write(started, 'a.ts', lines(6));
-  assert.equal(hook({ cwd: started }).decision, 'block', 'a recorded start opts in');
+  assert.deepEqual(hook({ cwd: started, session_id: 's1' }), {}, 'a recorded start alone does not opt in');
+  assert.deepEqual(hook({ cwd: started }), {});
+  assert.ok(!readdirSync(stateOf(started)).some((f) => f.startsWith('turn-') || f === 'hook-fingerprint'),
+    readdirSync(stateOf(started)).join());
 });
 
 test('after a block, committing the same change stays silent', () => {
