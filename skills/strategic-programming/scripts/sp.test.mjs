@@ -213,12 +213,14 @@ test('stale private indexes are cleaned, fresh ones kept', () => {
   const repo = makeRepo();
   run(repo, ['start']);
   const state = join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
-  for (const f of ['snapshot.1.index', 'snapshot.2.index.lock', 'snapshot.3.index']) writeFileSync(join(state, f), '');
-  utimesSync(join(state, 'snapshot.1.index'), 1e9, 1e9);
-  utimesSync(join(state, 'snapshot.2.index.lock'), 1e9, 1e9);
+  // 99999999 is above any pid limit (dead); this test process is alive.
+  const dead = 'snapshot.99999999.index', lock = 'snapshot.99999998.index.lock';
+  const live = `snapshot.${process.pid}.index`, fresh = 'snapshot.99999997.index';
+  for (const f of [dead, lock, live, fresh]) writeFileSync(join(state, f), '');
+  for (const f of [dead, lock, live]) utimesSync(join(state, f), 1e9, 1e9);
   write(repo, 'a.ts', lines(6));
   audit(repo);
-  assert.deepEqual(readdirSync(state).filter((f) => f.startsWith('snapshot.')), ['snapshot.3.index']);
+  assert.deepEqual(readdirSync(state).filter((f) => f.startsWith('snapshot.')).sort(), [live, fresh].sort());
 });
 
 test('a graph nx wrote badly is remembered as failed; one already there is not', () => {

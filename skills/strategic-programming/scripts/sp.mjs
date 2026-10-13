@@ -37,9 +37,15 @@ function repoPaths(cwd = process.cwd(), { mkdir = true } = {}) {
 }
 
 // A killed run leaves its private index (and lock) behind; any older than a minute goes.
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+// Private indexes left by a killed run: older than 60 s and their process gone.
 function pruneSnapshots(state) {
   for (const f of readdirSync(state)) {
-    if (!/^snapshot\..*\.index/.test(f)) continue;
+    const m = f.match(/^snapshot\.(\d+)\.index/);
+    if (!m || alive(Number(m[1]))) continue;
     try {
       if (Date.now() - statSync(join(state, f)).mtimeMs > 60_000) rmSync(join(state, f), { force: true });
     } catch { /* removed meanwhile */ }
@@ -568,6 +574,7 @@ function turn() {
 // turn-start tree and `tree` (the code snapshot now); null when the session has no usable record.
 function turnChangedCode(paths, payload) {
   const file = turnFile(paths, payload);
+  if (!file) return null;
   let from;
   try { from = readFileSync(file, 'utf8').trim(); } catch { return null; }
   if (!/^[0-9a-f]{40,64}$/.test(from) || tryGit(['cat-file', '-e', `${from}^{tree}`], { cwd: paths.top }) === null) return null;
