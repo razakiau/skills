@@ -220,9 +220,9 @@ function nxGraph(top, state, timeout = 20_000) {
   }));
 }
 
-// Names of the shared projects (two or more other projects depend on them) that own any of these paths.
-// A graph it cannot read gives [] and the report still prints.
-function sharedProjects({ top, state }, paths) {
+// For each path, the name of the shared project (two or more other projects depend on it) that owns it, or null.
+// A graph it cannot read gives all nulls and the report still prints.
+function sharedOwners({ top, state }, paths) {
   if (!paths.length) return [];
   try {
     const projects = (existsSync(join(top, 'nx.json')) && nxGraph(top, state)) || packageGraph(top);
@@ -234,38 +234,172 @@ function sharedProjects({ top, state }, paths) {
     const owner = (path) => projects
       .filter((p) => !p.root || path === p.root || path.startsWith(`${p.root}/`))
       .sort((a, b) => b.root.length - a.root.length)[0];
-    const names = paths.map(owner).filter((p) => p && (dependents.get(p.name) ?? 0) >= 2).map((p) => p.name);
-    return [...new Set(names)].sort();
+    return paths.map((path) => {
+      const p = owner(path);
+      return p && (dependents.get(p.name) ?? 0) >= 2 ? p.name : null;
+    });
   } catch {
-    return [];
+    return paths.map(() => null);
+  }
+}
+
+const JS_EXT = new Set('ts tsx js jsx mjs cjs'.split(' '));
+const ext = (path) => /\.([^./]+)$/.exec(path)?.[1] ?? '';
+const EXPORT_DECL = /^export\s+(default\s+)?(async\s+)?(function\*?|class|const|let|var|interface|type|enum|abstract\s+class)\s+([A-Za-z_$][\w$]*)/;
+const EXPORT_LIST = /^export\s*(type\s*)?\{/;
+
+// Undoes git's C-style quoting of a path in a patch header (\" \\ \t \n and octal bytes).
+function unquote(s) {
+  if (!s.startsWith('"')) return s;
+  const bytes = [];
+  const esc = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+  for (let i = 1; i < s.length - 1; i++) {
+    if (s[i] !== '\\') { bytes.push(...Buffer.from(s[i])); continue; }
+    const c = s[++i];
+    if (/[0-7]/.test(c)) { bytes.push(parseInt(s.slice(i, i + 3), 8)); i += 2; }
+    else bytes.push(esc[c] ?? c.charCodeAt(0));
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+// Names in `export { a, b as c }`, possibly spread over several added lines; the exported name wins.
+function listNames(text) {
+  return text.replace(EXPORT_LIST, '').replace(/\}.*$/s, '').split(',')
+    .map((s) => s.trim().replace(/^type\s+/, '').split(/\s+as\s+/).pop().trim())
+    .filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+}
+
+// New exports of the TS/JS files among `files`, read from added lines only (-U0), renames
+// detected (-M) so a move adds none. Header paths are checked against the -z file list.
+function readExports(top, base, tree, files) {
+  const wanted = new Set(files.filter((f) => !f.test && JS_EXT.has(ext(f.path)) && f.added).map((f) => f.path));
+  if (!wanted.size) return [];
+  const patch = git(['-c', 'core.quotePath=true', 'diff-tree', '-r', '-M', '-p', '-U0', '--no-color', '--no-ext-diff',
+    '--src-prefix=a/', '--dst-prefix=b/', base, tree], { cwd: top });
+  const found = [];
+  let path = null;
+  let pending = null;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('diff --git ')) { path = null; pending = null; continue; }
+    if (line.startsWith('+++ ')) {
+      const p = unquote(line.slice(4).replace(/\t$/, ''));
+      path = p.startsWith('b/') && wanted.has(p.slice(2)) ? p.slice(2) : null;
+      continue;
+    }
+    if (!path || !line.startsWith('+')) { pending = null; continue; }
+    const text = line.slice(1).trim();
+    if (pending !== null) {
+      pending += ` ${text}`;
+      if (text.includes('}')) { for (const name of listNames(pending)) found.push({ path, name }); pending = null; }
+      continue;
+    }
+    const decl = EXPORT_DECL.exec(text);
+    if (decl) found.push({ path, name: decl[4] });
+    else if (EXPORT_LIST.test(text)) {
+      if (text.includes('}')) for (const name of listNames(text)) found.push({ path, name });
+      else pending = text;
+    }
+  }
+  return found;
+}
+
+// Each added test file whose directory already held a test file at the base.
+function readTestBeside(top, base, files) {
+  const out = [];
+  const cache = new Map();
+  for (const f of files) {
+    if (!f.test || f.status !== 'A') continue;
+    const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+    if (!cache.has(dir)) {
+      const listing = tryGit(['ls-tree', '-z', dir ? `${base}:${dir}` : base], { cwd: top }) ?? '';
+      cache.set(dir, listing.split('\0').filter(Boolean)
+        .map((e) => ({ type: e.split(' ')[1], path: (dir ? `${dir}/` : '') + e.slice(e.indexOf('\t') + 1) }))
+        .filter((e) => e.type === 'blob' && isTest(e.path) && isCode(e.path))
+        .map((e) => e.path).sort());
+    }
+    const existing = cache.get(dir).find((p) => p !== f.path);
+    if (existing) out.push({ added: f.path, existing });
+  }
+  return out;
+}
+
+// Path entries of the first Markdown table in .agents/code-map.md whose header has a Path column.
+// null when the file or the column is missing.
+function readCodeMap(top) {
+  let text;
+  try { text = readFileSync(join(top, '.agents', 'code-map.md'), 'utf8'); } catch { return null; }
+  const cells = (line) => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim());
+  const rows = text.split('\n');
+  for (let i = 0; i + 1 < rows.length; i++) {
+    if (!/^\s*\|/.test(rows[i]) || !/^\s*\|?\s*:?-{3,}/.test(rows[i + 1])) continue;
+    const col = cells(rows[i]).findIndex((c) => c.replace(/[*_`]/g, '') === 'Path');
+    if (col < 0) continue;
+    const entries = [];
+    for (let j = i + 2; j < rows.length && /^\s*\|/.test(rows[j]); j++) {
+      for (const e of (cells(rows[j])[col] ?? '').split(',')) {
+        const entry = e.trim().replace(/`/g, '').trim().replace(/^\.\//, '').replace(/\/+$/, '');
+        if (entry) entries.push(entry);
+      }
+    }
+    return entries;
+  }
+  return null;
+}
+
+// A directory or file entry covers itself and everything under it; `*` stays in a segment, `**` crosses them.
+function mapCovers(entry, path) {
+  const re = entry.split(/(\*\*|\*|\?)/).map((part) => (part === '**' ? '.*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]'
+    : part.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join('');
+  return new RegExp(`^${re}(/.*)?$`).test(path);
+}
+
+function measured(what, fn, fallback) {
+  try { return fn(); } catch (err) {
+    process.stderr.write(`sp: ${what} not measured: ${String(err.message).split('\n')[0]}\n`);
+    return fallback;
   }
 }
 
 function audit(args) {
   const paths = repoPaths();
   const base = findBase(paths);
-  const files = readDiff(paths.top, base.ref, snapshotTree(paths));
+  const tree = snapshotTree(paths);
+  const files = readDiff(paths.top, base.ref, tree);
   const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
   const code = files.filter((f) => !f.test);
   const newFiles = code.filter((f) => f.status === 'A').map((f) => f.path);
-  const shared = sharedProjects(paths, code.map((f) => f.path));
+  const owners = sharedOwners(paths, code.map((f) => f.path));
+  const shared = [...new Set(owners.filter(Boolean))].sort();
+  const exports = measured('exports', () => readExports(paths.top, base.ref, tree, files), null);
+  const codeMap = measured('code map', () => readCodeMap(paths.top), null);
+  const unlistedHome = codeMap && code
+    .filter((f, i) => f.status === 'A' && owners[i] && !codeMap.some((e) => mapCovers(e, f.path)))
+    .map((f) => f.path);
+  const small = code.length <= 1 && newFiles.length === 0 && exports?.length === 0;
   const report = {
     base,
-    size: shared.length ? 'full+reviewer' : code.length <= 1 && newFiles.length === 0 ? 'small' : 'full',
+    size: shared.length ? 'full+reviewer' : small ? 'small' : 'full',
     code: sum(code),
     tests: sum(files.filter((f) => f.test)),
     files,
     newFiles,
-    exports: [],
+    exports,
     shared,
-    testBeside: [],
-    unlistedHome: null,
+    testBeside: measured('tests beside', () => readTestBeside(paths.top, base.ref, files), null),
+    unlistedHome,
     duplicates: null,
   };
   process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n' : formatText(report));
 }
 
 function formatText(r) {
+  // TS/JS files give names or "none"; other languages are named as not measured.
+  const code = r.files.filter((f) => !f.test);
+  const other = [...new Set(code.map((f) => ext(f.path)).filter((e) => !JS_EXT.has(e)))].sort();
+  const js = code.some((f) => JS_EXT.has(ext(f.path)));
+  const exportsLine = r.exports === null ? 'not measured (error)'
+    : [js || !other.length ? (r.exports.map((e) => e.name).join(', ') || 'none') : '',
+      other.length ? `not measured (${other.join(', ')})` : ''].filter(Boolean).join('; ');
   return [
     `base: ${r.base.kind} ${r.base.ref.slice(0, 12)}${r.base.note ? ` (${r.base.note})` : ''}`,
     `size: ${r.size}`,
@@ -273,6 +407,10 @@ function formatText(r) {
     `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
     ...r.files.map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
     `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,
+    `exports: ${exportsLine}`,
+    `tests beside: ${r.testBeside === null ? 'not measured (error)'
+      : r.testBeside.length ? r.testBeside.map((t) => `${t.added} (next to ${t.existing})`).join(', ') : 'none'}`,
+    r.unlistedHome === null ? 'code map: none' : `unlisted home: ${r.unlistedHome.length ? r.unlistedHome.join(', ') : 'none'}`,
   ].join('\n') + '\n';
 }
 

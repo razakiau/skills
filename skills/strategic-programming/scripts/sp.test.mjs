@@ -326,3 +326,89 @@ test('a workspace list it cannot read still gives the report', () => {
   assert.match(r.stdout, /^base: start /);
   assert.ok(r.stdout.includes('\nshared: none\n'), r.stdout);
 });
+
+test('new exports are listed, moved ones are not', () => {
+  const repo = makeRepo({ 'a.ts': lines(5), 'm.ts': 'export function moved() {}\n', 'b.py': lines(2) });
+  run(repo, ['start']);
+  write(repo, 'a.ts', lines(5) + 'export function toRange() {}\nexport { a };\n');
+  const a = audit(repo);
+  assert.deepEqual(a.exports, [{ path: 'a.ts', name: 'toRange' }, { path: 'a.ts', name: 'a' }]);
+  assert.ok(run(repo, ['audit']).stdout.includes('\nexports: toRange, a\n'));
+
+  git(repo, 'checkout', '-q', '--', 'a.ts');
+  git(repo, 'mv', 'm.ts', 'moved.ts');
+  const m = audit(repo);
+  assert.deepEqual(m.files.map((f) => [f.path, f.status]), [['moved.ts', 'R']]);
+  assert.deepEqual(m.exports, []);
+  assert.ok(run(repo, ['audit']).stdout.includes('\nexports: none\n'));
+
+  write(repo, 'b.py', lines(3));
+  assert.ok(run(repo, ['audit']).stdout.includes('\nexports: none; not measured (py)\n'));
+  git(repo, 'reset', '-q', '--hard');
+  write(repo, 'b.py', lines(3));
+  assert.ok(run(repo, ['audit']).stdout.includes('\nexports: not measured (py)\n'));
+});
+
+test('exports are read from paths with spaces and accents', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  write(repo, 'src/é dir/a "b".ts', 'export class Range {}\nexport type { T as U } from "./t";\n');
+  assert.deepEqual(audit(repo).exports, [
+    { path: 'src/é dir/a "b".ts', name: 'Range' },
+    { path: 'src/é dir/a "b".ts', name: 'U' },
+  ]);
+});
+
+test('a new export makes a one-file change not small', () => {
+  const repo = makeRepo();
+  run(repo, ['start']);
+  write(repo, 'a.ts', lines(5) + 'export const x = 1;\nexport{y,\n  z as w}\n');
+  const a = audit(repo);
+  assert.deepEqual(a.exports, [{ path: 'a.ts', name: 'x' }, { path: 'a.ts', name: 'y' }, { path: 'a.ts', name: 'w' }]);
+  assert.equal(a.size, 'full');
+});
+
+test('a new test file beside an existing one is flagged', () => {
+  const repo = makeRepo({ 'src/a.ts': lines(3), 'src/a.test.ts': lines(3), 'lib/c.ts': lines(3) });
+  run(repo, ['start']);
+  write(repo, 'src/b.test.ts', lines(2));
+  write(repo, 'lib/c.test.ts', lines(2));
+  const a = audit(repo);
+  assert.deepEqual(a.testBeside, [{ added: 'src/b.test.ts', existing: 'src/a.test.ts' }]);
+  assert.ok(run(repo, ['audit']).stdout.includes('\ntests beside: src/b.test.ts (next to src/a.test.ts)\n'));
+
+  const none = makeRepo();
+  run(none, ['start']);
+  write(none, 'a.ts', lines(6));
+  assert.deepEqual(audit(none).testBeside, []);
+  assert.ok(run(none, ['audit']).stdout.includes('\ntests beside: none\n'));
+});
+
+const CODE_MAP = [
+  '# Code map', '',
+  '| Concept | Home |', '|---|---|', '| dates | utils |', '',
+  '| Concept | Home | Path | Precedent |', '|---|---|---|---|',
+  '| date ranges | utils | `packages/utils/src/lib/js`, `docs/x` | toRange |',
+  '| empty | none | | |', '',
+].join('\n');
+
+test('a new file in a shared package outside the map is flagged', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/other/x.ts', lines(2));
+  write(repo, 'packages/utils/src/lib/js/y.ts', lines(2));
+  write(repo, 'apps/a/src/z.ts', lines(2));
+  const a = audit(repo);
+  assert.deepEqual(a.unlistedHome, ['packages/utils/src/other/x.ts']);
+  assert.ok(run(repo, ['audit']).stdout.includes('\nunlisted home: packages/utils/src/other/x.ts\n'));
+});
+
+test('no code map means unlisted home is not measured', () => {
+  const repo = makeWorkspace(['packages/*', 'apps/*']);
+  run(repo, ['start']);
+  write(repo, 'packages/utils/src/other/x.ts', lines(2));
+  assert.equal(audit(repo).unlistedHome, null);
+  const text = run(repo, ['audit']).stdout;
+  assert.ok(text.includes('\ncode map: none\n'), text);
+  assert.ok(!text.includes('unlisted home'), text);
+});
