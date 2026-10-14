@@ -11,6 +11,30 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "ask_user",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs\" ask",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "ask_user",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs\" asked",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

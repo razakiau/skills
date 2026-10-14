@@ -895,7 +895,7 @@ test('the --dup hint is given for a full change, not a small one', () => {
   write(full, 'b.ts', lines(2));
   const f = hook({ cwd: full });
   assert.match(f.reason, /\nsize: full\n/);
-  assert.ok(f.reason.includes(`For a Full change also run \`${dup}\`.`), f.reason);
+  assert.ok(f.reason.includes(`For a Full change also run \`${dup}\` in that repo.`), f.reason);
 });
 
 // A feature branch off main that already holds a committed code change.
@@ -1037,6 +1037,78 @@ test('after a block, committing the same change stays silent', () => {
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   git(repo, 'commit', '-q', '-am', 'work');
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
+});
+
+// The editor's folder is the main checkout; the work and the map are in a linked worktree.
+function makeWorktreeSetup() {
+  const main = makeRepo();
+  const wt = realpathSync(mkdtempSync(join(tmpdir(), 'sp-wt-')));
+  rmSync(wt, { recursive: true });
+  git(main, 'worktree', 'add', '-q', '-b', 'feat', wt);
+  write(wt, '.agents/code-map.md', MAP['.agents/code-map.md']);
+  return { main, wt };
+}
+
+test('a worktree with a code map is judged when the hook runs from the main checkout', () => {
+  const { main, wt } = makeWorktreeSetup();
+  assert.deepEqual(turn({ cwd: main, session_id: 's1' }), {});
+  write(wt, 'a.ts', lines(6));
+  const out = hook({ cwd: main, session_id: 's1' });
+  assert.equal(out.decision, 'block');
+  assert.ok(out.reason.includes(`\nrepo: ${wt}\n`), out.reason);
+  assert.match(out.reason, /\nM a\.ts \+1 -0\n/);
+  assert.deepEqual(hook({ cwd: main, session_id: 's1' }), {}, 'once per distinct diff');
+});
+
+test('a worktree the turn did not change stays silent, even with old work in it', () => {
+  const { main, wt } = makeWorktreeSetup();
+  write(wt, 'a.ts', lines(6));
+  turn({ cwd: main, session_id: 's1' });
+  assert.deepEqual(hook({ cwd: main, session_id: 's1' }), {});
+  assert.deepEqual(hook({ cwd: main }), {}, 'no turn record: only the window repo itself falls back to the base diff');
+});
+
+const ask = (payload) => call('ask', payload);
+const asked = (payload) => call('asked', payload);
+
+test('ask_user is held once with the audit when the turn changed code', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'read_file' }), {}, 'other tools pass');
+  const out = ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' });
+  assert.equal(out.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse');
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  const reason = out.hookSpecificOutput.permissionDecisionReason;
+  assert.equal(out.permissionDecisionReason, reason);
+  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nbase: '), reason);
+  assert.ok(reason.includes('then call ask_user again'), reason);
+  assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' }), {}, 'the same diff passes the second time');
+  assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {}, 'and Stop does not repeat it');
+});
+
+test('ask_user passes when the turn changed no code', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' }), {});
+  assert.deepEqual(ask({ cwd: repo, tool_name: 'ask_user' }), {}, 'no session id: never held, a question is not an end of turn');
+});
+
+test('the reply to ask_user starts a new turn, so edits made while waiting are not judged', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, sessionId: 's1' });
+  write(repo, 'a.ts', lines(6));
+  assert.equal(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }).permissionDecision, 'deny', 'camelCase payloads too');
+  assert.deepEqual(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {});
+  assert.deepEqual(asked({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {});
+  write(repo, 'a.ts', lines(8));
+  assert.deepEqual(asked({ cwd: repo, sessionId: 's1', toolName: 'read_file' }), {}, 'other tools do not re-record');
+  assert.equal(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }).permissionDecision, 'deny',
+    'without a re-record the edit counts as the agent\'s');
+  write(repo, 'a.ts', lines(9));
+  asked({ cwd: repo, sessionId: 's1', toolName: 'ask_user' });
+  assert.deepEqual(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {}, 'an edit before the reply is the owner\'s');
 });
 
 test('the hook reason lists at most 40 files', () => {

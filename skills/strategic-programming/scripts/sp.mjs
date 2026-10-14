@@ -658,15 +658,29 @@ function readPayload() {
   }
 }
 
-// The payload's repo, only when it opted in: a code map at the top. A recorded start is not
-// enough, because `start` runs in every repo the skill touches, personal ones included.
-// The state dir is created only then.
-function optedIn(payload) {
-  const paths = repoPaths(typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd(), { mkdir: false });
-  if (!paths) return null;
-  if (!existsSync(join(paths.top, '.agents', 'code-map.md'))) return null;
-  mkdirSync(paths.state, { recursive: true });
-  return paths;
+// Every repo the hook judges, each one opted in by a code map at its top (a recorded start is not
+// enough: `start` runs in every repo the skill touches). The payload's own repo (`own: true`), then each other
+// linked worktree of it that has a code map. Editors run hooks in the window's folder, while the
+// work, and the map, often sit in a linked worktree (`git worktree add`).
+function hookRepos(payload) {
+  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+  const own = repoPaths(cwd, { mkdir: false });
+  if (!own) return [];
+  const out = [];
+  const add = (paths, isOwn) => {
+    if (!existsSync(join(paths.top, '.agents', 'code-map.md'))) return;
+    mkdirSync(paths.state, { recursive: true });
+    out.push({ ...paths, own: isOwn });
+  };
+  add(own, true);
+  const list = tryGit(['worktree', 'list', '--porcelain'], { cwd: own.top }) ?? '';
+  for (const line of list.split('\n')) {
+    const dir = line.startsWith('worktree ') ? line.slice(9) : null;
+    if (!dir || resolve(dir) === resolve(own.top) || !existsSync(join(dir, '.agents', 'code-map.md'))) continue;
+    const paths = repoPaths(dir, { mkdir: false });
+    if (paths && paths.top !== own.top) add(paths, false);
+  }
+  return out;
 }
 
 // One turn-start record per session (VS Code sends session_id, Copilot CLI sessionId);
@@ -683,13 +697,32 @@ function silently(fn) {
   process.exitCode = 0;
 }
 
-// UserPromptSubmit: records the code snapshot the agent's turn starts from. Prints {}.
+// Records the code snapshot the agent's turn starts from, in every judged repo.
+function recordTurn(payload) {
+  for (const paths of hookRepos(payload)) {
+    const file = turnFile(paths, payload);
+    if (file) writeFileSync(file, `${codeSnapshot(paths)}\n`);
+  }
+}
+
+// UserPromptSubmit: a turn starts. Prints {}.
 function turn() {
   silently(() => {
     const payload = readPayload();
-    const paths = payload && optedIn(payload);
-    const file = paths && turnFile(paths, payload);
-    if (file) writeFileSync(file, `${codeSnapshot(paths)}\n`);
+    if (payload) recordTurn(payload);
+  });
+}
+
+// The tool an agent uses to talk to the user mid-turn (TaskSync's ask_user): a session that
+// keeps its turn open through it never reaches Stop, so the question is its end of turn.
+const ASK_TOOLS = new Set(['ask_user']);
+const toolOf = (payload) => [payload.tool_name, payload.toolName].find((v) => typeof v === 'string') ?? '';
+
+// PostToolUse ask_user: the user's reply starts the next turn. Prints {}.
+function asked() {
+  silently(() => {
+    const payload = readPayload();
+    if (payload && ASK_TOOLS.has(toolOf(payload))) recordTurn(payload);
   });
 }
 
@@ -710,30 +743,57 @@ function turnChangedCode(paths, payload) {
 
 const MAX_HOOK_FILES = 40;
 
-// Stop hook: blocks once per distinct code diff with the audit, but only after a turn in which
-// the agent changed code (or when there is no turn record: no session id, or the harness never
-// sent the turn start). Always exits 0.
-function hook() {
-  silently(() => {
-    const payload = readPayload();
-    if (!payload || payload.stop_hook_active || payload.stopHookActive) return null;
-    const paths = optedIn(payload);
-    if (!paths) return null;
+// The audit text for every judged repo whose code the agent changed this turn, or null. A repo
+// blocks once per distinct code diff. Without a turn record (no session id, or the harness never
+// sent the turn start) only the payload's own repo is judged, on its whole diff since the base;
+// `strict` (the ask_user gate) judges nothing without a record.
+function auditTurn(payload, { strict = false } = {}) {
+  const parts = [];
+  for (const paths of hookRepos(payload)) {
     const turned = turnChangedCode(paths, payload);
-    if (turned && !turned.changed) return null;
+    if (turned ? !turned.changed : strict || !paths.own) continue;
     const built = buildReport(paths, turned?.tree);
-    if (!built.report.files.some((f) => !f.test)) return null;
+    if (!built.report.files.some((f) => !f.test)) continue;
     const print = fingerprint(paths.top, built.report, built.tree);
     const file = join(paths.state, 'hook-fingerprint');
     let last = null;
     try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
-    if (print === last) return null;
-    const reason = 'strategic-programming audit (see the strategic-programming skill):\n'
-      + `${formatText(built.report, built.unmeasured, MAX_HOOK_FILES)}\nAnswer every flag above against your `
-      + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
-      + (built.report.size === 'small' ? '' : ` For a Full change also run \`node "${SELF}" audit --dup\`.`);
+    if (print === last) continue;
     writeFileSync(file, `${print}\n`);
-    return { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
+    parts.push({ paths, built });
+  }
+  if (!parts.length) return null;
+  const body = parts.map(({ paths, built }) => (paths.own ? '' : `repo: ${paths.top}\n`)
+    + formatText(built.report, built.unmeasured, MAX_HOOK_FILES)).join('\n');
+  return 'strategic-programming audit (see the strategic-programming skill):\n'
+    + `${body}\nAnswer every flag above against your `
+    + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
+    + (parts.every(({ built }) => built.report.size === 'small') ? ''
+      : ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.`);
+}
+
+// Stop hook: blocks the end of a turn with the audit. Always exits 0.
+function hook() {
+  silently(() => {
+    const payload = readPayload();
+    if (!payload || payload.stop_hook_active || payload.stopHookActive) return null;
+    const reason = auditTurn(payload);
+    return reason && { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
+  });
+}
+
+// PreToolUse ask_user: holds the question once with the audit, like Stop. Always exits 0.
+function ask() {
+  silently(() => {
+    const payload = readPayload();
+    if (!payload || !ASK_TOOLS.has(toolOf(payload))) return null;
+    const audit = auditTurn(payload, { strict: true });
+    if (!audit) return null;
+    const reason = `${audit} Put the answers in your message, then call ask_user again.`;
+    return {
+      permissionDecision: 'deny', permissionDecisionReason: reason,
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+    };
   });
 }
 
@@ -766,8 +826,10 @@ try {
   else if (cmd === 'audit') audit(rest);
   else if (cmd === 'hook') hook();
   else if (cmd === 'turn') turn();
+  else if (cmd === 'ask') ask();
+  else if (cmd === 'asked') asked();
   else {
-    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn\n');
+    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn | ask | asked\n');
     process.exitCode = 2;
   }
 } catch (err) {
