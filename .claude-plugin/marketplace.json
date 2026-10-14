@@ -1,0 +1,11 @@
+{
+  "name": "razakiau",
+  "owner": { "name": "razakiau" },
+  "plugins": [
+    {
+      "name": "razakiau-skills",
+      "source": "./",
+      "description": "no-slop and strategic-programming"
+    }
+  ]
+}

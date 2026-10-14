@@ -1,0 +1,6 @@
+{
+  "name": "razakiau-skills",
+  "description": "Agent skills: no-slop (prose editing) and strategic-programming (code placement and diff audit).",
+  "license": "MIT",
+  "repository": "https://github.com/razakiau/skills"
+}
