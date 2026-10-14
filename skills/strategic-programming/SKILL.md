@@ -93,6 +93,8 @@ Answer each flag in your reply in one of three ways:
 - **justify** it against the placement note (which part of the note calls for it);
 - for an **unlisted home**: propose a code-map row (the owner approves it) or move the file under a mapped path.
 
+`unlisted home` covers new files in **shared** packages only. A new file anywhere else is never flagged there: check its path against the code map yourself, and answer a mismatch like an unlisted home.
+
 The numbers stand. `+300 -20` asks "why did nothing get replaced?"; a new file asks "why is the precedent's file the wrong home?"; a new export asks "who besides this change calls it?". For a feature, "new behaviour; the precedent was extended, nothing duplicates it" is a complete answer. Lines are a signal to explain: a diff gets smaller by replacing code in the owning layer, and every line that carries behaviour stays.
 
 Then run the reading checks in [reference/audit-checks.md](reference/audit-checks.md) on the diff. Done: each flag has one answer (remove, justify, or row/move) and every reading check has run.
