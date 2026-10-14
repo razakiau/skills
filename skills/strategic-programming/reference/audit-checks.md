@@ -14,12 +14,20 @@ For each new helper, function or module: imagine deleting it and inlining its bo
 
 An interface, option, parameter or strategy with one implementation and one caller is a guess about the future. Write the concrete code, and add the seam in the change that brings its second user.
 
+## Errors
+
+For each `throw`, `raise`, rejected promise or error return the change adds or edits:
+
+- **Type.** When the repo has its own error classes, use the one the nearest precedent throws for the same kind of failure (a broken internal rule, a caller error, a missing record). Search for it before writing a bare `Error`, `Exception` or string; a bare one is a flag to justify.
+- **Context.** The message or fields carry the ids someone needs to debug it from one log line: the entity id, the job or request id, the value that broke the rule.
+- **Path.** Name what reports this failure on the path it runs on, read in the code: a global HTTP exception filter covers HTTP handlers only; queue workers, scheduled jobs, event consumers and CLI commands log and track only what their own runner does. When nothing on that path logs it with its stack, the error type or a handler has to.
+
 ## The cleanup list
 
 Only on lines this change adds. Remove narrating comments, one-use variables and type laundering directly. For `try`/`catch`, defensive checks, retries and fallbacks this change added, remove one only when you can name where the state is ruled out (the owning layer's check, a type the compiler enforces). Anything else goes in your reply as a note for the owner.
 
 - comments that narrate or restate the code;
-- `try`/`catch` that recovers nothing, translates nothing and adds no context: errors propagate to the existing handler;
+- `try`/`catch` that recovers nothing, translates nothing and adds no context, when a handler on that path reports the error (see Errors);
 - defensive checks this change added for a state the owning layer already rules out (name where);
 - type laundering: `as any`, `as unknown as T`, widening then asserting;
 - one-use intermediate variables that add no domain meaning;
@@ -41,12 +49,10 @@ On Full + reviewer, dispatch a subagent that has not seen the conversation. Give
 1. the placement note, verbatim;
 2. the `audit --dup` output;
 3. the diff `audit` measured: `git diff <sha on its base: line>`, plus the content of each new untracked file;
-4. the prompt below, followed by this file's sections from "Concept duplication" to "The cleanup list", and the full text of tests.md's junk list.
+4. the prompt below, followed by this file's sections from "Concept duplication" to "The cleanup list" (Errors included), and the full text of tests.md's junk list.
 
 Prompt:
 
 > You review one code change against the plan its author wrote before writing it. Read the placement note, the audit output and the diff. Report, one line each with file and line: (a) code outside the owning layer the note names; (b) code shaped differently from the precedent the note names (file, naming, signature); (c) call sites the note lists that the diff leaves unchanged, and call sites with the same need the note missed (search the repo); (d) audit flags the diff leaves unexplained; (e) items from the reading checks below. Return findings only, or the single word `none`.
 
 Answer each finding like an audit flag. A `none` is reported as such; a reply with no text means you say so and do the review yourself, without retrying.
-
-Adapted from openclaw `deslop` (MIT), Matt Pocock's `codebase-design`, and NeoLabHQ context-engineering-kit.

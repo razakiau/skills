@@ -37,5 +37,3 @@ In every test this change adds or edits, rewrite each of these against the real 
 ## Replace, don't layer
 
 A test at a deeper interface replaces a shallower test of the same contract when every assertion the shallower one makes is also made by the deeper one, which fails on the same regression. Delete those in the same diff and report each one removed with the test that now owns it. A behaviour-preserving refactor keeps its tests green unchanged; when one breaks, it was testing the implementation, and it moves to the boundary.
-
-Adapted from openclaw `test-audit` (MIT) and Matt Pocock's `codebase-design`.

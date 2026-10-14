@@ -3,8 +3,7 @@ name: strategic-programming
 description: Use when fixing a bug, adding a feature or refactoring code, or when the strategic-programming audit blocks your turn. Before writing, a placement note names the owning layer, the precedent and the call sites, and states tactical or strategic. After, a bundled audit script measures the diff and each flag gets an answer. Doc- and config-only changes skip it.
 license: MIT
 metadata:
-  version: "1.0.0"
-  sources: "openclaw test-audit and deslop (MIT); Ousterhout, A Philosophy of Software Design, ch. 3"
+  version: "1.1.0"
 ---
 
 # Strategic programming
@@ -103,12 +102,10 @@ Then run the reading checks in [reference/audit-checks.md](reference/audit-check
 
 Dispatch a fresh subagent with the prompt in [reference/audit-checks.md](reference/audit-checks.md#fresh-reviewer). Answer its findings like flags. Done: findings answered; a `none` is reported as such; a reply with no text means you say so and do the review yourself, without retrying.
 
+### 8. Before the pull request
+
+A branch that holds several changes, or work from before this skill was loaded, gets one more pass before the pull request: run `audit --dup` from the merge base (no `start`), answer its flags, run the reading checks, and, for Full + reviewer, a fresh reviewer on that whole diff. Done: the branch's whole diff has been audited and reviewed once.
+
 ## The end-of-turn hook
 
-The hook runs only in repos with `.agents/code-map.md` at the top; elsewhere step 6 is the only audit. There it speaks only after a turn in which you changed non-test code, and blocks at most once per distinct diff. Its block starts `strategic-programming audit (see the strategic-programming skill):`, then the `audit` lines (at most 40 file lines, no duplicates line). Answer every flag as in step 6 and finish. The owner's own edits between turns pass silently when the turn was recorded; without a turn record (no session id) it judges the whole diff since the base.
-
-## Out of scope
-
-- Prose, comment and commit-message wording: the `no-slop` skill.
-- A cleanup pass over code this change did not touch: `code-simplification`.
-- Redesigning module boundaries: `improve-codebase-architecture`.
+The hook runs only in repos with `.agents/code-map.md` at the top, the editor's folder or a linked worktree of it (`git worktree add`); elsewhere step 6 is the only audit. It speaks after a turn in which you changed non-test code: at the end of the turn, or when you call `ask_user` mid-turn. It blocks at most once per distinct diff. The block starts `strategic-programming audit (see the strategic-programming skill):`, then a `repo:` line when the code is in a worktree, then the `audit` lines (at most 40 file lines, no duplicates line). Answer every flag as in step 6, then finish, or call `ask_user` again. The owner's edits between turns, and while you wait on `ask_user`, pass silently; without a turn record (no session id) it judges the editor's repo on its whole diff since the base.
