@@ -1,7 +1,7 @@
 # Foundry: a stage-aware skill for growing a product with agents
 
-**Date:** 2026-11-01. **Status:** awaiting the owner's approval.
-**Evidence:** the owner's agent history from 2026-09-24 to 2026-11-01, his repos, and two research rounds. They are summarised below; the full notes are in that chat's session files.
+**Date:** 2026-11-01. **Status:** approved by the owner on 2026-11-01.
+**Evidence:** the owner's agent history from 2026-09-24 to 2026-11-01, his repos, his saved sources, and two research rounds. It is summarised below. For each choice, [2026-11-01-foundry-sources.md](2026-11-01-foundry-sources.md) gives where it comes from, with links.
 
 ## Why
 
@@ -103,7 +103,7 @@ Superpowers stays the per-feature loop. Foundry decides what surrounds that loop
 | **Explore** | Spikes and variants to find out what to build. Code quality doesn't matter yet. | A ~10-line AGENTS.md: what this is, how to run it, how to test it. Nothing else. |
 | **Product** | Someone relies on it, or it will be built on for weeks. | PRODUCT.md (intent, users, non-goals, rules that hold everywhere); decisions folder with an index; glossary; ARCHITECTURE.md plus the code map; DESIGN.md before screens are built; CONSTRAINTS.md; one `check` command; a "how to verify" section naming the command that starts the app and the tool an agent uses to check it (browser, mobile, HTTP); a security pass in review. That pass is a line in AGENTS.md's workflow rule: the reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed. Nothing is added to CI at this stage (my call). |
 | **Live** | Deployed and used by people other than the owner. | Readiness tier 1 (below) as a short definition of done; a threat model; per-change static security scanning in CI (semgrep or the stack's equivalent, plus a dependency scan); per-release live pentest (recommended provider, run by the owner); runbooks for what can break; error tracking and backups with a tested restore. |
-| **Scale** | Paying or enterprise users, more contributors, or many agents working at once. | Readiness tiers 2–3; scheduled gardening; performance budgets. |
+| **Scale** | Paying or enterprise users, more contributors, or many agents working at once. | Readiness tiers 2 and 3; scheduled gardening; performance budgets. |
 
 The stage is a proposal with its reasons. The script gathers the signals:
 
