@@ -35,7 +35,9 @@ Each entry is `{"interview": ..., "when": ..., "provider": ..., "done": false}`.
 - product: `code map`, when `at the first change that touches two modules`. Provider: strategic-programming, else its `reference/code-map.md` template.
 - product: `glossary`, when `when a second domain term is disputed, or at the first decision`.
 - product: `quality bar`, when `before the first PR at product`.
+- product: `spec template`, when `at the first change bigger than a day`. Provider: writing-plans, else ask the owner.
 - live: `threat model`, when `on entering live`.
+- live: `change notes and release`, when `on entering live`. Provider: changesets or release-please, else ask the owner.
 
 The router in [routing.md](routing.md) judges when each moment has come. The script only stores the text.
 Done: each entry is in `queue` with `done: false`, and `node <skill dir>/scripts/foundry.mjs state` prints the file without error.

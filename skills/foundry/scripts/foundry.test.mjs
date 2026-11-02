@@ -818,6 +818,7 @@ test('init-files: a recorded design_md is linked, and DESIGN.md is not asked for
   const bad = run(repo, ['state', '--set', 'design_md=../x/DESIGN.md']);
   assert.equal(bad.code, 2);
   assert.equal(run(repo, ['state', '--set', 'design_md=web/notes.md']).code, 2);
+  for (const v of ['web/OLDDESIGN.md', 'xDESIGN.md', '/abs/DESIGN.md']) assert.equal(run(repo, ['state', '--set', `design_md=${v}`]).code, 2, v);
 });
 
 test('init-files: rust repo without runner gets .agents/check.sh', () => {

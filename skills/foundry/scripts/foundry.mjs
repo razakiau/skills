@@ -313,7 +313,7 @@ const SETTERS = {
     s.has_ui = v === 'true';
   },
   design_md: (s, v) => {
-    if (!/^[^/\s][^\s]*DESIGN\.md$/.test(v) || v.split('/').includes('..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
+    if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').includes('..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
     s.design_md = v;
   },
 };
@@ -699,6 +699,7 @@ export function gardenRange(top) {
   if (!to) throw new FoundryError('no commits yet', 1);
   const last = readState(top)?.garden_last ?? null;
   let from;
+  let empty = false;
   if (last !== null) {
     const known = gitOut(top, ['rev-parse', '--verify', '-q', `${last}^{commit}`]);
     if (!known || gitOut(top, ['merge-base', '--is-ancestor', known, to]) === null) {
@@ -707,10 +708,10 @@ export function gardenRange(top) {
     from = known;
   } else {
     // With fewer than 50 commits, start before the root: the empty tree, so the root commit is in the range.
-    from = gitOut(top, ['rev-parse', '--verify', '-q', `HEAD~${GARDEN_DEFAULT}^{commit}`])
-      ?? gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
+    from = gitOut(top, ['rev-parse', '--verify', '-q', `HEAD~${GARDEN_DEFAULT}^{commit}`]);
+    if (from === null) { from = EMPTY_TREE(top); empty = true; }
   }
-  const commits = from === EMPTY_TREE(top)
+  const commits = empty
     ? Number(gitOut(top, ['rev-list', '--count', to])) || 0
     : Number(gitOut(top, ['rev-list', '--count', `${from}..${to}`])) || 0;
   return { from, to, commits };
