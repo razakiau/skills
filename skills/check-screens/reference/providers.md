@@ -1,6 +1,6 @@
 # Providers
 
-ui-check names what it needs, not a tool. For each need, use the first provider you can reach. Never install one yourself: name it, say why, and let the owner install it.
+check-screens names what it needs, not a tool. For each need, use the first provider you can reach. Never install one yourself: name it, say why, and let the owner install it.
 
 | Need | Providers, in order |
 | --- | --- |
@@ -11,7 +11,7 @@ ui-check names what it needs, not a tool. For each need, use the first provider 
 | Tokens and drift | dembrandt when installed; otherwise the tokens file the map names in `design-source:` |
 | Route table | The framework's CLI (`react-router routes --json`, nuxt-mcp-dev) or the code ([map.md](map.md#route-tables)) |
 
-`capture` uses the Playwright that the app has installed (`playwright` or `@playwright/test`, resolved from the repo top). It does not bring its own. When the app keeps Playwright in another folder, such as a workspace package, set `UICHECK_PLAYWRIGHT_FROM=<that folder>` for the command.
+`capture` uses the Playwright that the app has installed (`playwright` or `@playwright/test`, resolved from the repo top). It does not bring its own. When the app keeps Playwright in another folder, such as a workspace package, set `CHECK_SCREENS_PLAYWRIGHT_FROM=<that folder>` for the command.
 
 ## Capture with a browser MCP
 
@@ -21,7 +21,7 @@ When `capture` exits 3, capture with the browser MCP your harness has, and keep 
 2. Set the colour scheme to light, then to dark when the app has both. Use the MCP's colour scheme emulation, not a theme toggle in the page, unless the app has no other way.
 3. Turn on reduced motion when the MCP can, open the URL, wait for the network to go idle, then wait 300 ms more.
 4. Check the page: it has text, and it shows no framework error overlay. If it fails, it is not a capture; fix the page first.
-5. Take a full-page screenshot and save it as `.ui-check/captures/<screen>-<width>-<theme>[-<state>].png`. The screen and state are slugs: lower case, every run of other characters turned into one `-`, so `Settings / Billing` becomes `settings-billing`.
+5. Take a full-page screenshot and save it as `.check-screens/captures/<screen>-<width>-<theme>[-<state>].png`. The screen and state are slugs: lower case, every run of other characters turned into one `-`, so `Settings / Billing` becomes `settings-billing`.
 
 Files saved this way work with `record` and `approve` like the script's own. An MCP that cannot save to a path returns an image: save it under the same name yourself. When the MCP cannot set the width, say which width you captured instead and do not name the file as if it were 360 or 1440.
 
