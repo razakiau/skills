@@ -615,6 +615,26 @@ test('approve --captures copies and records', () => {
     new RegExp(`^approved: docs/ui/approved/home-1440-light\\.png docs/ui/approved/home-360-light\\.png \\(${today()}, owner\\)$`, 'm'));
 });
 
+test('approve writes the same line shapes as the template example', () => {
+  // The template's commented example must not drift from what approve writes.
+  const example = readFileSync(TEMPLATE, 'utf8').split('\n');
+  const shape = (line) => line.replace(/\d{4}-\d{2}-\d{2}/g, 'DATE').replace(/[^ ()]+\.png/g, 'FILE').replace(/, [^)]+\)$/, ', NAME)');
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'docs/ui/mockups/home-360-light.png': 'png' });
+  write(repo, '.ui-check/captures/home-360-light.png', 'light');
+  write(repo, '.ui-check/captures/home-1440-light.png', 'wide');
+  assert.equal(run(repo, ['approve', 'home', '--by', 'Some Owner', '--mockup', 'docs/ui/mockups/home-360-light.png']).code, 0);
+  assert.equal(run(repo, ['approve', 'home', '--by', 'owner', '--captures']).code, 0);
+  const written = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8').split('\n');
+  for (const key of ['mockup', 'approved']) {
+    const want = example.find((l) => l.startsWith(`${key}: `));
+    const got = written.find((l) => l.startsWith(`${key}: `));
+    assert.equal(shape(got), shape(want), key);
+  }
+  const hash = example.find((l) => l.startsWith('last-capture: ')).split(' ')[2];
+  assert.match(hash, /^sha256:[0-9a-f]{12}$/);
+  assert.notEqual(hash, 'sha256:000000000000');
+});
+
 test('approve: unknown screen exits 1 and copies nothing', () => {
   const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
   write(repo, '.ui-check/captures/nowhere-360-light.png', 'png');

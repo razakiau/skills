@@ -48,7 +48,7 @@ Done: you have a list of screens to capture, and each one has an entry in the ma
 
 ## 2. Capture
 
-Start the app's dev server and keep it running. Use real or seeded data, not lorem ipsum. Clear the screen's older captures, so step 6 records only this run, then capture. The pattern uses the screen's slug:
+Start the app's dev server and keep it running. Use real or seeded data, not lorem ipsum. Clear the older captures of each screen you capture, siblings included, so the review and step 6 see only this run, then capture. The pattern uses the screen's slug; run the `find` once per screen:
 
 ```sh
 mkdir -p .ui-check/captures && find .ui-check/captures -name 'report-[0-9]*.png' -delete
@@ -128,7 +128,7 @@ Report to the owner:
 4. The `ask` items, as questions.
 5. What was not checked, and why: no dark theme, no browser, the round limit.
 
-Then record each captured screen, once its files stop changing:
+Then record each screen the change touched, once its files stop changing. Do not record the siblings you captured only to compare:
 
 ```sh
 node <skill dir>/scripts/uicheck.mjs record report
