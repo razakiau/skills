@@ -1,0 +1,86 @@
+/* Demo app tokens: a 4/8/16/24 spacing scale and a light and a dark colour block. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --radius: 8px;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c1f24;
+  --muted: #5d6573;
+  --accent: #2f6fde;
+  --border: #dde1e7;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121418;
+    --surface: #1d2026;
+    --text: #e9ecf1;
+    --muted: #a1a9b6;
+    --accent: #7aa7ff;
+    --border: #2e333b;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding-bottom: 72px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.header h1 { margin: 0; font-size: 20px; }
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.card {
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.card h2 { margin: 0 0 var(--space-1); font-size: 16px; }
+.card p { margin: 0; color: var(--muted); }
+
+.tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.tabs a {
+  flex: 1;
+  padding: var(--space-3) var(--space-2);
+  text-align: center;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.tabs a[aria-current="page"] { color: var(--accent); font-weight: 600; }

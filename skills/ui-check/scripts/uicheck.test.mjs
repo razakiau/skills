@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { slug, parseMap, setField, mapPath, readMap, MARKER, USAGE, UiCheckError } from './uicheck.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { slug, parseMap, setField, mapPath, readMap, MARKER, USAGE, UiCheckError, findPlaywright, captureName } from './uicheck.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UICHECK = join(HERE, 'uicheck.mjs');
@@ -247,5 +247,106 @@ test('cli: a bad or missing command prints USAGE and exits 2', () => {
     assert.equal(r.code, 2, args.join(' '));
   }
   assert.equal(run(repo, []).stderr, USAGE);
-  for (const cmd of ['map', 'init']) assert.match(USAGE, new RegExp(`^  node uicheck\\.mjs ${cmd}\\b`, 'm'));
+  for (const cmd of ['map', 'init', 'capture']) assert.match(USAGE, new RegExp(`^  node uicheck\\.mjs ${cmd}\\b`, 'm'));
+});
+
+// Browser tests need Playwright; point UICHECK_PLAYWRIGHT_FROM at a project that has it installed.
+const noBrowser = !findPlaywright(process.env.UICHECK_PLAYWRIGHT_FROM ?? process.cwd()) && 'no playwright';
+const DEMO = join(HERE, 'fixtures', 'demo');
+const demoUrl = (page) => pathToFileURL(join(DEMO, page)).href;
+const pngWidth = (buf) => buf.readUInt32BE(16);
+const isPng = (buf) => buf.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+const pngs = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.png')).sort() : []);
+
+test('capture: names', () => {
+  assert.equal(captureName('Settings / Billing', 360, 'dark', 'Empty'), 'settings-billing-360-dark-empty.png');
+  assert.equal(captureName('Home', 1440, 'light'), 'home-1440-light.png');
+});
+
+test('capture: no playwright exits 3', () => {
+  const repo = makeRepo();
+  const empty = realpathSync(mkdtempSync(join(tmpdir(), 'uicheck-nopw-')));
+  const r = run(repo, ['capture', '--url', demoUrl('home.html'), '--screen', 'Home'], undefined, { UICHECK_PLAYWRIGHT_FROM: empty });
+  assert.equal(r.code, 3);
+  assert.equal(r.stderr, `ui-check: no playwright in ${empty}; capture with the browser MCP instead (reference/providers.md)\n`);
+  assert.equal(existsSync(join(repo, '.ui-check')), false);
+});
+
+test('capture: a missing --url or --screen is a usage error', () => {
+  const repo = makeRepo();
+  assert.equal(run(repo, ['capture', '--screen', 'Home']).code, 2);
+  assert.equal(run(repo, ['capture', '--url', demoUrl('home.html')]).code, 2);
+});
+
+test('capture: writes widths x themes', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  const r = run(repo, ['capture', '--url', demoUrl('home.html'), '--screen', 'Home']);
+  assert.equal(r.code, 0, r.stderr);
+  const out = join(repo, '.ui-check', 'captures');
+  const want = ['home-1440-dark.png', 'home-1440-light.png', 'home-360-dark.png', 'home-360-light.png'];
+  assert.deepEqual(pngs(out), want);
+  for (const f of want) {
+    assert.ok(isPng(readFileSync(join(out, f))), f);
+    assert.match(r.stdout, new RegExp(`^wrote .*${f.replace('.', '\\.')}$`, 'm'));
+  }
+  assert.equal(pngWidth(readFileSync(join(out, 'home-360-light.png'))), 360);
+  assert.equal(pngWidth(readFileSync(join(out, 'home-1440-light.png'))), 1440);
+});
+
+test('capture: dark theme differs from light', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  const r = run(repo, ['capture', '--url', demoUrl('home.html'), '--screen', 'Home', '--widths', '360', '--state', 'Default']);
+  assert.equal(r.code, 0, r.stderr);
+  const out = join(repo, '.ui-check', 'captures');
+  assert.deepEqual(pngs(out), ['home-360-dark-default.png', 'home-360-light-default.png']);
+  assert.ok(!readFileSync(join(out, 'home-360-light-default.png')).equals(readFileSync(join(out, 'home-360-dark-default.png'))));
+});
+
+test('capture: --out relative to the repo top, from a subdirectory', { skip: noBrowser }, () => {
+  const repo = makeRepo({ 'README.md': 'demo\n', 'src/x.txt': 'x\n' });
+  const r = spawnSync('node', [UICHECK, 'capture', '--url', demoUrl('report.html'), '--screen', 'Report', '--widths', '360', '--themes', 'light', '--out', 'shots'],
+    { cwd: join(repo, 'src'), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(pngs(join(repo, 'shots')), ['report-360-light.png']);
+});
+
+test('capture: refused url writes nothing', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  write(repo, 'docs/ui/screens.md', MAP);
+  const r = run(repo, ['capture', '--url', 'http://127.0.0.1:9/', '--screen', 'Home']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /could not reach http:\/\/127\.0\.0\.1:9\//);
+  assert.equal(r.stdout, '');
+  assert.equal(existsSync(join(repo, '.ui-check')), false);
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), MAP);
+});
+
+test('capture: a closed port is refused and writes nothing', { skip: noBrowser }, async () => {
+  const { createServer } = await import('node:net');
+  const srv = createServer();
+  await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+  const port = srv.address().port;
+  await new Promise((ok) => srv.close(ok));
+  const repo = makeRepo();
+  const url = `http://127.0.0.1:${port}/`;
+  const r = run(repo, ['capture', '--url', url, '--screen', 'Home']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, `ui-check: could not reach ${url}\n`);
+  assert.equal(existsSync(join(repo, '.ui-check')), false);
+});
+
+test('capture: error overlay is not a capture', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  const r = run(repo, ['capture', '--url', demoUrl('error.html'), '--screen', 'Broken', '--widths', '360', '--themes', 'light']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /warn \S*broken-360-light\.png: error overlay/);
+  assert.deepEqual(pngs(join(repo, '.ui-check', 'captures')), []);
+});
+
+test('capture: an empty page is not a capture', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  const r = run(repo, ['capture', '--url', 'data:text/html,<html><body>  </body></html>', '--screen', 'Blank', '--widths', '360', '--themes', 'light']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /warn \S*blank-360-light\.png: empty page/);
+  assert.deepEqual(pngs(join(repo, '.ui-check', 'captures')), []);
 });
