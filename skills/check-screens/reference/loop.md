@@ -22,7 +22,7 @@ For a style tweak: run step 2 with `--widths 360 --themes light`, compare the ca
 node <skill dir>/scripts/check-screens.mjs touched
 ```
 
-It compares the work tree with `HEAD` and counts untracked files too. On a branch, pass the point where it left main: `touched $(git merge-base main HEAD)`. A plain `touched main` also lists the files main changed since then. It prints one line per hit:
+It compares the work tree with `HEAD` and counts untracked files too. Before the first commit it lists every file. A base that is not a commit or tag exits 1. On a branch, pass the point where it left main: `touched $(git merge-base main HEAD)`. A plain `touched main` also lists the files main changed since then. It prints one line per hit:
 
 ```text
 screen home (src/home.tsx)

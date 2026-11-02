@@ -490,7 +490,7 @@ test('touched: before the first commit every file is new', () => {
   assert.equal(r.stdout, 'screen home (src/home.tsx)\n');
   const named = run(repo, ['touched', 'HEAD']);
   assert.equal(named.code, 1);
-  assert.equal(named.stderr, 'check-screens: unknown base HEAD: not a commit in this repo\n');
+  assert.equal(named.stderr, 'check-screens: unknown base HEAD: not a commit in this repo (no commits yet; run touched with no base)\n');
 });
 
 test('touched: an unknown base says so', () => {
@@ -557,7 +557,7 @@ test('record: captures older than the screen files are refused, map unchanged', 
   utimesSync(join(repo, '.check-screens/captures/home-360-light.png'), past, past);
   const r = run(repo, ['record', 'home']);
   assert.equal(r.code, 1);
-  assert.equal(r.stderr, 'check-screens: captures of home are older than its files: home-360-light.png; capture again\n');
+  assert.equal(r.stderr, 'check-screens: captures of home are older than its files (they changed after the capture): home-360-light.png; capture again\n');
   assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
 });
 

@@ -9,4 +9,4 @@ Copy to ~/.config/check-screens/local.md and edit. check-screens reads it for na
 
 Notes:
 
-- Which recorded screen id matches which map entry: keep it in the map entry's `design-source:` line.
+- Which recorded screen id matches which map entry: keep that list here when the ids are private, or on the entry's `design-source:` line when the repo may hold them.

@@ -139,5 +139,6 @@ Working captures live in `.check-screens/captures/`, which `init` gitignores. Ap
 
 - `record <screen>` reads only files named `<slug>-<width>-<theme>[-<state>].png` in the capture folder, where `<width>` is digits and `<theme>` is `light` or `dark`. Other files are ignored. It records every matching file there, so clear older captures before a run ([loop.md, step 2](loop.md#2-capture)).
 - `record` needs a `file:` line, and refuses an entry whose files are missing or outside the repo top (exit 1).
+- `record` also refuses captures older than the newest of the entry's `file:` paths (exit 1): the files changed after the capture, so capture again. Only those paths are compared; a shared file the screen imports is not.
 - `approve --captures` copies the same files to `docs/ui/approved/`. It overwrites files of the same name there, and it does not delete older approved files the new set lacks. Delete those by hand, with the owner's yes, when a variant is dropped.
 - `--out <dir>` points `record`, `approve` and `capture` at another capture folder. A relative path is taken from the repo top.

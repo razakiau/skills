@@ -385,7 +385,8 @@ function diffBase(top, base, given) {
   if (!given && !commitOf(top, 'HEAD')) {
     return execFileSync('git', ['hash-object', '-t', 'tree', '--stdin'], { cwd: top, input: '', encoding: 'utf8' }).trim();
   }
-  throw new CheckScreensError(`unknown base ${base}: not a commit in this repo`, 1);
+  const hint = commitOf(top, 'HEAD') ? '' : ' (no commits yet; run touched with no base)';
+  throw new CheckScreensError(`unknown base ${base}: not a commit in this repo${hint}`, 1);
 }
 
 function touchedCmd(args) {
@@ -474,7 +475,7 @@ function recordCmd(args) {
   if (!hash) throw new CheckScreensError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
   const newest = Math.max(...list(entry.fields.file).map((f) => statSync(join(top, f)).mtimeMs));
   const old = files.filter((f) => statSync(join(dir, f)).mtimeMs < newest);
-  if (old.length) throw new CheckScreensError(`captures of ${entry.name} are older than its files: ${old.join(', ')}; capture again`, 1);
+  if (old.length) throw new CheckScreensError(`captures of ${entry.name} are older than its files (they changed after the capture): ${old.join(', ')}; capture again`, 1);
   const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();
   writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'last-capture', `${today()} ${hash} ${variants.join(' ')}`));
   process.stdout.write(`recorded ${entry.name}: ${variants.join(' ')}\n`);
