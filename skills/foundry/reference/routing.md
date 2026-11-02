@@ -36,7 +36,7 @@ Tell the owner, in this order:
 1. The proposed stage and the recorded stage, if any. Say when they differ.
 2. Every reason from `reasons`, quoted.
 3. Each required file whose value in `files` is `false`.
-4. Each queued interview whose moment has come, with its provider. When the entry names none, take one from `~/.config/foundry/local.md` if that file exists, then from [providers.md](providers.md).
+4. Each queued interview whose moment has come, with its provider. When the entry names none, pick one as [providers-cmd.md](providers-cmd.md) does.
 5. The AGENTS.md state: missing, `migrated`, or `unmigrated` from `agents_md.state`.
 
 Done: all five are stated, even when one is "none".

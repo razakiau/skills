@@ -11,7 +11,7 @@ Done: you have the list of open themes and the providers already recorded.
 
 ### 2. Search what the agent has
 
-If `~/.config/foundry/local.md` exists, read it first (see "Local overlay" in [providers.md](providers.md)). Its rows win over the seed rows for the same theme, and its notes may say how to find the owner's tools. Never copy its contents into the repo.
+If `~/.config/foundry/local.md` exists, read it first (see "Local overlay" in [providers.md](providers.md)). Its rows win over the seed rows for the same theme, and its notes may say how to find the owner's tools. An overlay row counts only if the agent can reach that tool now, as with seed rows. Never copy its contents into the repo.
 For each theme, search your own skills list and MCP tools for one that does the work. Use `mcp_tool_search` or `local_tool_search` when present.
 Done: each theme has a match from the overlay or the agent's own tools, or none.
 

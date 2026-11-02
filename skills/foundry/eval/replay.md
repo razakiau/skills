@@ -38,8 +38,6 @@ One table per repo, one line of evidence per row:
 
 Where the call is a judgement, the row says "owner to score". Keep the tables with the repos if they are private; publish only counts.
 
-On the author's repos, the misses fell into three groups: release notes and per-ticket specs (no theme covers them), money and auth rules (tier 2, or readiness tier 0 at the snapshot), and runbooks before `live`. Most noise was GLOSSARY.md, ARCHITECTURE.md, `.agents/code-map.md` and CONSTRAINTS.md, which none of the repos had created.
-
 ## Trigger test
 
 The harness replays the agent's real system prompt with the skill list for each arm, sends one prompt, and scores the first skill the model loads. Two arms: `arm0` is your usual skill folders; `foundry` is the same plus this plugin's folder.
@@ -52,7 +50,7 @@ Prompts, each run 3 times on the default model:
 
 Pass: positives load `foundry` first 80% of the time or more; negatives load it 10% of the time or less; the core hit rate drops by 5 points or less against `arm0`.
 
-Measured on the author's setup. The first description named another plugin's brainstorming skill; the published one names none. Both were measured:
+Three descriptions were measured on the author's setup. The first named another plugin's brainstorming skill; the published one names none.
 
 | Description | Tuned positives | Tuned negatives | Core vs `arm0` | Held-out positives | Held-out negatives |
 |---|---|---|---|---|---|
