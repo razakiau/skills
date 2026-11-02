@@ -115,7 +115,7 @@ test('state: rejects bad values and unknown keys, exit 2', () => {
     ['has_ui=yes', 'foundry: has_ui must be true or false\n'],
     ['readiness_tier=x', 'foundry: readiness_tier must be a whole number\n'],
     ['agents_md.state=old', 'foundry: agents_md.state must be one of migrated, unmigrated\n'],
-    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui\n'],
+    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md\n'],
     ['stage', 'foundry: --set needs key=value\n'],
   ]) {
     const r = run(repo, ['state', '--set', arg]);
@@ -563,6 +563,24 @@ test('doc-check: required lists REQUIRED[stage] in order', () => {
   assert.equal(ok.code, 0, ok.stdout);
 });
 
+test('doc-check: a state file on one line warns instead of reading as explore', () => {
+  const r = docCheck(docRepo({ '.agents/foundry.json': JSON.stringify(docState()) + '\n' }));
+  assert.deepEqual(findings(r, 'state'), ['doc-check: WARN state: .agents/foundry.json has no stage on its own line; write it 2-space, one key per line']);
+});
+
+test('doc-check: a command continued with a backslash is one command', () => {
+  const agents = AGENTS_OK.replace('cd .\n```', 'cd .\nsh \\\n  .agents/doc-check.sh\nnot-a-real-cmd-x \\\n  --flag\n```');
+  const r = docCheck(docRepo({ 'AGENTS.md': agents }));
+  assert.deepEqual(findings(r, 'command').map((l) => l.replace(/:\d+ /, ':N ')), ['doc-check: FAIL command: AGENTS.md:N not-a-real-cmd-x not found']);
+});
+
+test('doc-check: links inside ~~~ fences and code spans are not checked; ./ decision links count once', () => {
+  const agents = AGENTS_OK + '\n~~~\n[x](nope.md)\n~~~\n\nUse `[y](nope2.md)` here.\n';
+  const r = docCheck(docRepo({ 'AGENTS.md': agents, 'docs/decisions/index.md': '# Decisions\n\n- [start](./0001-start.md)\n- [gone](./0002-gone.md)\n' }));
+  assert.deepEqual(findings(r, 'link'), []);
+  assert.deepEqual(findings(r, 'decisions'), ['doc-check: FAIL decisions: docs/decisions/index.md -> 0002-gone.md missing']);
+});
+
 test('doc-check: missing state file means explore, budget 100, migrated', () => {
   const files = { 'AGENTS.md': AGENTS_OK + 'filler\n'.repeat(120), 'PRODUCT.md': '# P\n', 'ARCHITECTURE.md': '# A\n' };
   const r = docCheck(makeRepo(files));
@@ -758,6 +776,48 @@ test('init-files: mise.toml and Makefile get a check task', () => {
   const mr = init(mk, '--stage', 'explore');
   assert.equal(read(mk, 'Makefile'), 'check:\n\tmine\n');
   assert.ok(mr.stdout.split('\n').includes('kept Makefile check (exists)'), mr.stdout);
+  const inline = makeRepo({ 'mise.toml': '[tasks]\ntest = "pytest"\n\n[tools]\nnode = "22"\n' });
+  init(inline, '--stage', 'explore');
+  assert.match(read(inline, 'mise.toml'), /\[tasks\.check\]\nrun = "mise run test && sh \.agents\/doc-check\.sh"\n$/, 'an inline test task counts');
+  const inlineCheck = makeRepo({ 'mise.toml': '[tasks]\ncheck = "make all"\n' });
+  const ic = init(inlineCheck, '--stage', 'explore');
+  assert.equal(read(inlineCheck, 'mise.toml'), '[tasks]\ncheck = "make all"\n');
+  assert.ok(ic.stdout.split('\n').includes('kept mise.toml check (exists)'), ic.stdout);
+  const other = makeRepo({ 'mise.toml': '[tasks]\nbuild = "x"\n\n[env]\ntest = "1"\n' });
+  init(other, '--stage', 'explore');
+  assert.match(read(other, 'mise.toml'), /run = "sh \.agents\/doc-check\.sh"\n$/, 'a test key outside [tasks] is not a task');
+});
+
+test('init-files: a name with $ patterns is written as given', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  init(repo, '--stage', 'explore', '--name', "a$&b$'c$1");
+  assert.match(read(repo, 'AGENTS.md'), /^# Working on a\$&b\$'c\$1\n/);
+});
+
+test('init-files: --stage other than the recorded stage warns', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  init(repo, '--stage', 'explore');
+  const r = init(repo, '--stage', 'product');
+  assert.ok(r.stdout.split('\n').includes('warn --stage product differs from the recorded stage explore; the state keeps explore, so set it with state --set stage=product first'), r.stdout);
+  run(repo, ['state', '--set', 'stage=product']);
+  assert.ok(!init(repo, '--stage', 'product').stdout.includes('differs'));
+});
+
+test('init-files: a recorded design_md is linked, and DESIGN.md is not asked for at the top', () => {
+  const repo = makeRepo({ 'web/App.tsx': 'x', 'web/DESIGN.md': '# D\n' });
+  init(repo, '--stage', 'explore');
+  assert.equal(signals(repo, NO_SESSIONS).design_md_found, 'web/DESIGN.md');
+  run(repo, ['state', '--set', 'design_md=web/DESIGN.md', '--set', 'stage=product']);
+  assert.equal(signals(repo, NO_SESSIONS).design_md_found, null);
+  assert.equal(signals(repo, NO_SESSIONS).files['web/DESIGN.md'], true);
+  assert.equal(signals(repo, NO_SESSIONS).files['DESIGN.md'], undefined);
+  const r = init(repo, '--stage', 'product');
+  assert.ok(r.stdout.split('\n').includes('agents-md: add link to web/DESIGN.md'), r.stdout);
+  assert.ok(!repoCheck(repo).lines.some((l) => l.endsWith('required: DESIGN.md')), 'doc-check reads design_md');
+  assert.ok(!repoCheck(repo).lines.some((l) => l.endsWith('required: web/DESIGN.md')));
+  const bad = run(repo, ['state', '--set', 'design_md=../x/DESIGN.md']);
+  assert.equal(bad.code, 2);
+  assert.equal(run(repo, ['state', '--set', 'design_md=web/notes.md']).code, 2);
 });
 
 test('init-files: rust repo without runner gets .agents/check.sh', () => {

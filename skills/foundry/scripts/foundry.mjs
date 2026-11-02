@@ -44,6 +44,10 @@ export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: 
 export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
 export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi || !UI_ONLY.includes(f));
 
+// A repo may keep DESIGN.md below the top (web/DESIGN.md); the state records where as design_md.
+const designPath = (state) => (typeof state?.design_md === 'string' && state.design_md ? state.design_md : 'DESIGN.md');
+const asRecorded = (state) => (f) => (f === 'DESIGN.md' ? designPath(state) : f);
+
 const COPILOT_SESSIONS = () => join(homedir(), '.copilot', 'session-state');
 
 // v1 thresholds for proposing the product stage.
@@ -240,11 +244,15 @@ export function signals(top, opts = {}) {
   }
   if (!reasons.length) reasons.push('no signal beyond explore');
 
-  const required = requiredFor(proposed, has_ui);
+  const required = requiredFor(proposed, has_ui).map(asRecorded(recorded));
   const fileMap = Object.fromEntries(required.map((f) => [f, src.has(f)]));
   const behind = asOf || !src.git ? null : behindUpstream(top);
+  // An unrecorded DESIGN.md one folder down, for the owner to record with state --set design_md=<path>.
+  const design_md_found = has_ui && !recorded?.design_md && !src.has('DESIGN.md')
+    ? files.find((f) => /^[^/]+\/DESIGN\.md$/.test(f)) ?? null
+    : null;
 
-  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found };
   if (asOf) out.as_of = asOf.sha;
   return out;
 }
@@ -294,6 +302,10 @@ const SETTERS = {
   has_ui: (s, v) => {
     if (v !== 'true' && v !== 'false') throw new FoundryError('has_ui must be true or false', 2);
     s.has_ui = v === 'true';
+  },
+  design_md: (s, v) => {
+    if (!/^[^/\s][^\s]*DESIGN\.md$/.test(v) || v.split('/').includes('..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
+    s.design_md = v;
   },
 };
 
@@ -398,8 +410,11 @@ function planCheck(top) {
   if (existsSync(misePath)) {
     const text = readFileSync(misePath, 'utf8');
     const command = 'mise run check';
-    if (/^\[tasks\.check\]/m.test(text)) return { file: 'mise.toml', text: null, command };
-    const run = /^\[tasks\.test\]/m.test(text) ? `mise run test && sh ${DOC_CHECK}` : `sh ${DOC_CHECK}`;
+    // A task is a [tasks.x] table, or an x = ... key inside [tasks].
+    const tasksBody = text.match(/^\[tasks\][ \t]*\n([\s\S]*?)(?=^\[|(?![\s\S]))/m)?.[1] ?? '';
+    const hasTask = (t) => new RegExp(`^\\[tasks\\.${t}\\]`, 'm').test(text) || new RegExp(`^[ \\t]*"?${t}"?[ \\t]*=`, 'm').test(tasksBody);
+    if (hasTask('check')) return { file: 'mise.toml', text: null, command };
+    const run = hasTask('test') ? `mise run test && sh ${DOC_CHECK}` : `sh ${DOC_CHECK}`;
     return { file: 'mise.toml', text: `${text.replace(/\n*$/, '\n')}\n[tasks.check]\nrun = "${run}"\n`, command };
   }
   const makePath = join(top, 'Makefile');
@@ -415,26 +430,26 @@ function planCheck(top) {
 }
 
 // The `## Where things are` entries for the files that will exist.
-const linkedFiles = (willExist) => LINKS.filter(([f]) => willExist(f));
+const linkedFiles = (willExist, rename = (f) => f) => LINKS.map(([f, what]) => [rename(f), what]).filter(([f]) => willExist(f));
 const hasSecurityLine = (stage) => stage !== 'explore';
 
 const hasUiLine = (stage, hasUi) => hasUi && stage !== 'explore';
 
-function agentsMd(stage, name, check, willExist, hasUi) {
-  const links = linkedFiles(willExist).map(([f, what]) => `- [${f}](${f}): ${what}.`);
+function agentsMd(stage, name, check, willExist, hasUi, rename) {
+  const links = linkedFiles(willExist, rename).map(([f, what]) => `- [${f}](${f}): ${what}.`);
   let text = template('AGENTS.md')
-    .replace('{{name}}', name)
-    .replace('{{check}}', check)
-    .replace('{{links}}', links.length ? links.join('\n') : 'Nothing yet beyond this file.');
+    .replace('{{name}}', () => name)
+    .replace('{{check}}', () => check)
+    .replace('{{links}}', () => (links.length ? links.join('\n') : 'Nothing yet beyond this file.'));
   if (!hasSecurityLine(stage)) text = text.replace(`${SECURITY_LINE}\n`, '');
   if (!hasUiLine(stage, hasUi)) text = text.replace(`${UI_LINE}\n`, '');
   return text;
 }
 
 // What a kept AGENTS.md lacks against the one agentsMd would write at this stage, as `agents-md:` lines.
-function agentsMdGaps(text, stage, willExist, hasUi) {
+function agentsMdGaps(text, stage, willExist, hasUi, rename) {
   const linked = (f) => text.includes(`](${f})`) || text.includes(`](./${f})`) || text.includes(`](${f}#`);
-  const gaps = linkedFiles(willExist).filter(([f]) => !linked(f)).map(([f]) => `agents-md: add link to ${f}`);
+  const gaps = linkedFiles(willExist, rename).filter(([f]) => !linked(f)).map(([f]) => `agents-md: add link to ${f}`);
   if (hasSecurityLine(stage) && !text.includes(SECURITY_LINE)) gaps.push(`agents-md: add line: ${SECURITY_LINE}`);
   if (hasUiLine(stage, hasUi) && !text.includes(UI_LINE)) gaps.push(`agents-md: add line: ${UI_LINE}`);
   return gaps;
@@ -447,7 +462,9 @@ function ignoredWarnings(top, paths) {
   const r = spawnSync('git', ['check-ignore', '-v', '-z', '--stdin'], {
     cwd: top, input: paths.join('\0') + '\0', encoding: 'utf8',
   });
-  if (r.status !== 0 || !r.stdout) return [];
+  // 1 means nothing is ignored; anything else is git failing, which must not read as "nothing ignored".
+  if (r.status === 1 || (r.status === 0 && !r.stdout)) return [];
+  if (r.status !== 0) return [`warn could not check ignore rules: ${(r.stderr || `git exited ${r.status}`).trim().split('\n')[0]}`];
   const f = r.stdout.split('\0');
   const out = [];
   for (let i = 0; i + 3 < f.length; i += 4) {
@@ -474,13 +491,14 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
+  if (current && current.stage !== stage) lines.push(`warn --stage ${stage} differs from the recorded stage ${current.stage}; the state keeps ${current.stage}, so set it with state --set stage=${stage} first`);
   reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
-    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi));
+    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, asRecorded(current)));
   } else if (agentsExisted) lines.push('kept AGENTS.md (exists, unmigrated)');
   else {
-    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi)]);
+    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi, asRecorded(current))]);
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
@@ -681,7 +699,7 @@ export function hookLine(top) {
   if (!Object.hasOwn(REQUIRED, s.stage)) throw new FoundryError(`unknown stage ${s.stage}`, 1);
   const queue = s.queue ?? [];
   if (!Array.isArray(queue)) throw new FoundryError('queue is not a list', 1);
-  const missing = requiredFor(s.stage, s.has_ui === true).filter((f) => !present(top, f));
+  const missing = requiredFor(s.stage, s.has_ui === true).map(asRecorded(s)).filter((f) => !present(top, f));
   const open = queue.filter((q) => q && q.done === false).length;
   if (!missing.length && !open) return null;
   const names = missing.length ? missing.slice(0, 2).join(', ') : 'none';

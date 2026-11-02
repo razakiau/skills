@@ -1,5 +1,5 @@
 #!/bin/sh
-# foundry doc-check v1.1.0
+# foundry doc-check v1.2.0
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
 # budget, stage-required files and the precedence sentence.
@@ -28,7 +28,11 @@ stage=$(state_value stage)
 has_ui=$(state_value has_ui)
 budget=$(state_value budget_lines)
 md_state=$(state_value state)
+design_md=$(state_value design_md)
+state_unread=
+if [ -f "$STATE_FILE" ] && [ -z "$stage" ]; then state_unread=1; fi
 [ -n "$stage" ] || stage=explore
+[ -n "$design_md" ] || design_md=DESIGN.md
 [ -n "$budget" ] || budget=100
 [ -n "$md_state" ] || md_state=migrated
 case $budget in
@@ -42,9 +46,12 @@ finding() {
   echo "doc-check: $1 $2: $3"
 }
 
-# Markdown text with fenced code blocks removed.
+# Markdown text with fenced code blocks (``` or ~~~) and inline code spans removed.
 prose() {
-  awk '/^[[:space:]]*```/ { fence = !fence; next } !fence { print }' "$1"
+  awk '
+    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+    !fence { gsub(/`[^`]*`/, ""); print }
+  ' "$1"
 }
 
 # Link targets of a file, one per line: anchor, <angle brackets> and "title" stripped.
@@ -77,7 +84,7 @@ check_links() {
         '' | http:* | https:* | mailto:*) continue ;;
       esac
       # Decision files linked from the index belong to the decisions rule.
-      if [ "$doc" = docs/decisions/index.md ] && is_decision_name "$target"; then continue; fi
+      if [ "$doc" = docs/decisions/index.md ] && is_decision_name "${target#./}"; then continue; fi
       case $target in
         /*) path="$root$target" ;;
         *) path="$root/$dir/$target" ;;
@@ -112,12 +119,18 @@ check_decisions() {
 }
 
 # Prints "lineno<TAB>command" for each command in a ```sh block under a
-# "## ...Check..." or "## ...Commands..." heading of AGENTS.md.
+# "## ...Check..." or "## ...Commands..." heading of AGENTS.md. A line ending
+# in a backslash continues on the next one; lineno is the first line.
 agents_commands() {
   awk '
-    fence == 1 && /^[[:space:]]*```/ { fence = 0; next }
+    fence == 1 && /^[[:space:]]*```/ { if (cmd != "") print start "\t" cmd; cmd = ""; fence = 0; next }
     fence == 1 {
-      if (wanted && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*#/) print NR "\t" $0
+      if (!wanted) next
+      if (cmd == "" && ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/)) next
+      line = $0
+      more = sub(/\\[[:space:]]*$/, "", line)
+      if (cmd == "") { start = NR; cmd = line } else cmd = cmd " " line
+      if (!more) { print start "\t" cmd; cmd = "" }
       next
     }
     /^```sh[[:space:]]*$/ { fence = 1; wanted = section; next }
@@ -184,8 +197,12 @@ check_agents_md() {
   fi
 }
 
-# Must match REQUIRED in foundry.mjs, in the same order.
+# Must match REQUIRED in foundry.mjs, in the same order. DESIGN.md stands for
+# the recorded design_md path.
 check_required() {
+  if [ -n "$state_unread" ]; then
+    finding WARN state ".agents/foundry.json has no stage on its own line; write it 2-space, one key per line"
+  fi
   explore='AGENTS.md'
   product="$explore PRODUCT.md docs/decisions/index.md GLOSSARY.md ARCHITECTURE.md .agents/code-map.md DESIGN.md docs/ui/screens.md CONSTRAINTS.md"
   live="$product docs/threat-model.md docs/runbooks/"
@@ -200,6 +217,7 @@ check_required() {
   esac
   for f in $required; do
     case $f in DESIGN.md | docs/ui/screens.md) if [ "$has_ui" != true ]; then continue; fi ;; esac
+    if [ "$f" = DESIGN.md ]; then f=$design_md; fi
     case $f in
       */) if [ ! -d "$root/$f" ]; then finding FAIL required "$f"; fi ;;
       *) if [ ! -f "$root/$f" ]; then finding FAIL required "$f"; fi ;;
