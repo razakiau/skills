@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // The first line of every screen map. A file without it belongs to someone else.
 export const MARKER = '<!-- ui-check screen map v1 -->';
@@ -14,6 +15,7 @@ export const USAGE = [
   'usage:',
   '  node uicheck.mjs map [--json] [<screen> | --family <family> | --sibling-of <screen>]',
   '  node uicheck.mjs init',
+  '  node uicheck.mjs capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .ui-check/captures]',
   '',
 ].join('\n');
 
@@ -204,13 +206,118 @@ function initCmd(args) {
   }
 }
 
-const DISPATCH = { map: mapCmd, init: initCmd };
+// The Playwright entry point the target app has installed, or null.
+// UICHECK_PLAYWRIGHT_FROM overrides fromDir.
+export function findPlaywright(fromDir) {
+  const dir = process.env.UICHECK_PLAYWRIGHT_FROM ?? fromDir;
+  const req = createRequire(join(resolve(dir), 'package.json'));
+  for (const name of ['playwright', '@playwright/test']) {
+    try { return req.resolve(name); } catch { /* try the next one */ }
+  }
+  return null;
+}
+
+// `<screen>-<width>-<theme>[-<state>].png`, with the screen and state as slugs.
+export function captureName(screen, width, theme, state) {
+  return `${slug(screen)}-${width}-${theme}${state ? '-' + slug(state) : ''}.png`;
+}
+
+const PHONE_HEIGHT = 800;
+const DESKTOP_HEIGHT = 900;
+const DESKTOP_FROM = 1024;
+const SETTLE_MS = 300;
+const THEMES = ['light', 'dark'];
+const OVERLAYS = ['vite-error-overlay', 'nextjs-portal', '#webpack-dev-server-client-overlay', '[data-nextjs-dialog]'];
+// Navigation errors that mean nothing answered at the URL (a dev server that is not running).
+// UNSAFE_PORT: Chromium never connects to ports like 9, so nothing there can be reached either.
+const UNREACHABLE = /net::ERR_(CONNECTION_(REFUSED|RESET|CLOSED|FAILED|TIMED_OUT)|ADDRESS_UNREACHABLE|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|FILE_NOT_FOUND|EMPTY_RESPONSE|UNSAFE_PORT)/;
+
+async function captureCmd(args) {
+  const { options } = parseArgs(args, { options: ['--url', '--screen', '--widths', '--themes', '--state', '--out'] });
+  const url = options['--url'];
+  const screen = options['--screen'];
+  if (!url || !screen) throw new UiCheckError('capture needs --url and --screen', 2);
+  if (!slug(screen)) throw new UiCheckError(`screen name ${screen} has no letters or digits`, 2);
+  const widths = list(options['--widths'] ?? '360,1440').map((w) => {
+    if (!/^[1-9][0-9]*$/.test(w)) throw new UiCheckError(`bad width ${w}`, 2);
+    return Number(w);
+  });
+  const themes = list(options['--themes'] ?? 'light,dark');
+  for (const t of themes) if (!THEMES.includes(t)) throw new UiCheckError(`bad theme ${t}; use light or dark`, 2);
+  if (!widths.length || !themes.length) throw new UiCheckError('give at least one width and one theme', 2);
+  const state = options['--state'];
+
+  const top = repoTop();
+  const outOpt = options['--out'] ?? '.ui-check/captures';
+  const out = isAbsolute(outOpt) ? outOpt : join(top, outOpt);
+  const shown = (path) => (relative(top, path).startsWith('..') ? path : relative(top, path));
+
+  const from = process.env.UICHECK_PLAYWRIGHT_FROM ?? top;
+  const resolved = findPlaywright(top);
+  if (!resolved) throw new UiCheckError(`no playwright in ${from}; capture with the browser MCP instead (reference/providers.md)`, 3);
+  const pw = await import(pathToFileURL(resolved).href);
+  const chromium = pw.chromium ?? pw.default?.chromium;
+  let browser;
+  try {
+    browser = await chromium.launch();
+  } catch (err) {
+    throw new UiCheckError(`playwright in ${from} could not launch chromium: ${String(err.message).split('\n')[0]}`, 3);
+  }
+
+  let bad = 0;
+  try {
+    for (const width of widths) {
+      for (const theme of themes) {
+        const file = join(out, captureName(screen, width, theme, state));
+        const context = await browser.newContext({
+          viewport: { width, height: width >= DESKTOP_FROM ? DESKTOP_HEIGHT : PHONE_HEIGHT },
+          colorScheme: theme,
+          reducedMotion: 'reduce',
+        });
+        try {
+          const page = await context.newPage();
+          try {
+            await page.goto(url, { waitUntil: 'networkidle' });
+          } catch (err) {
+            if (UNREACHABLE.test(String(err.message))) throw new UiCheckError(`could not reach ${url}`, 1);
+            throw new UiCheckError(`could not load ${url}: ${String(err.message).split('\n')[0]}`, 1);
+          }
+          await page.waitForTimeout(SETTLE_MS);
+          const { empty, overlay } = await page.evaluate((selectors) => ({
+            empty: !(document.body?.innerText ?? '').trim(),
+            overlay: selectors.some((s) => document.querySelector(s)),
+          }), OVERLAYS);
+          if (overlay || empty) {
+            // Not a valid capture: say why and drop any older file of the same name.
+            if (overlay) process.stderr.write(`warn ${shown(file)}: error overlay\n`);
+            if (empty) process.stderr.write(`warn ${shown(file)}: empty page\n`);
+            rmSync(file, { force: true });
+            bad++;
+            continue;
+          }
+          const png = await page.screenshot({ fullPage: true });
+          // The out dir appears only once a capture succeeds.
+          mkdirSync(out, { recursive: true });
+          writeFileSync(file, png);
+          process.stdout.write(`wrote ${shown(file)}\n`);
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  if (bad) throw new UiCheckError(`${bad} capture${bad > 1 ? 's' : ''} not valid; fix the page and capture again`, 1);
+}
+
+const DISPATCH = { map: mapCmd, init: initCmd, capture: captureCmd };
 // The CLI command names; SKILL.md may only mention these.
 export const COMMANDS = Object.keys(DISPATCH);
 
-function main([cmd, ...rest]) {
+async function main([cmd, ...rest]) {
   try {
-    if (Object.hasOwn(DISPATCH, cmd)) DISPATCH[cmd](rest);
+    if (Object.hasOwn(DISPATCH, cmd)) await DISPATCH[cmd](rest);
     else {
       process.stderr.write(USAGE);
       process.exitCode = 2;
