@@ -739,3 +739,79 @@ test('fileHash, stale, record: a file outside the repo top counts as gone', () =
   assert.match(r.stdout, /^gone report \(\/.+\/x\.tsx\)$/m);
   assert.ok(r.stdout.endsWith('stale: 0, gone: 2, unmapped: 0\n'));
 });
+
+// the skill and its references
+
+const SKILL_DIR = join(HERE, '..');
+const readSkill = (rel) => readFileSync(join(SKILL_DIR, rel), 'utf8');
+
+function frontmatter(text) {
+  const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  assert.ok(m, 'SKILL.md starts with frontmatter');
+  const fields = {};
+  for (const line of m[1].split('\n')) {
+    const f = /^([a-z]+):[ \t]*(.*)$/.exec(line);
+    if (f) fields[f[1]] = f[2].replace(/^"(.*)"$/, '$1');
+  }
+  return fields;
+}
+
+test('skill: description ≤ 300 chars, names screen and mockup, says what skips it', () => {
+  const text = readSkill('SKILL.md');
+  const fm = frontmatter(text);
+  assert.equal(fm.name, 'ui-check');
+  assert.equal(fm.license, 'MIT');
+  assert.match(text, /^metadata:\n  version: "1\.0\.0"$/m);
+  const d = fm.description;
+  assert.ok(d && d.length <= 300, `description is ${d?.length} chars`);
+  assert.match(d, /screen/i);
+  assert.match(d, /mockup/i);
+  const skip = d.split(/(?<=\.)\s+/).find((s) => /skip/i.test(s));
+  assert.ok(skip, 'a sentence says what skips it');
+  assert.match(skip, /backend/i);
+  assert.ok(text.split('\n').length < 60, 'SKILL.md is under 60 lines');
+});
+
+test('skill: every reference link resolves', () => {
+  const text = readSkill('SKILL.md');
+  const links = [...text.matchAll(/\]\(((?:reference|templates)\/[^)#\s]+)/g)].map((m) => m[1]);
+  for (const ref of ['reference/loop.md', 'reference/map.md', 'reference/reviewer.md', 'reference/providers.md']) {
+    assert.ok(links.includes(ref), `SKILL.md links ${ref}`);
+  }
+  for (const link of links) assert.ok(existsSync(join(SKILL_DIR, link)), `${link} exists`);
+  // The references link each other and the template the same way.
+  for (const ref of readdirSync(join(SKILL_DIR, 'reference'))) {
+    for (const m of readSkill(`reference/${ref}`).matchAll(/\]\(((?:\.\.\/)?[a-z-]+(?:\/[a-z-]+)*\.(?:md|mjs))\)/g)) {
+      assert.ok(existsSync(join(SKILL_DIR, 'reference', m[1])), `reference/${ref} links ${m[1]}`);
+    }
+  }
+});
+
+test('skill: command table matches the CLI', () => {
+  const text = readSkill('SKILL.md');
+  const section = text.split(/^## Commands$/m)[1]?.split(/^## /m)[0] ?? '';
+  const inTable = section.split('\n')
+    .map((l) => /^\| `([a-z]+)\b[^`]*` \|/.exec(l)?.[1]).filter(Boolean);
+  const inUsage = USAGE.split('\n')
+    .filter((l) => l.startsWith('  node uicheck.mjs '))
+    .map((l) => l.slice('  node uicheck.mjs '.length).split(' ')[0]);
+  assert.ok(inUsage.length > 0);
+  assert.deepEqual([...new Set(inTable)].sort(), [...new Set(inUsage)].sort());
+});
+
+test('reviewer: brief names the three dispositions and three tags', () => {
+  const text = readSkill('reference/reviewer.md');
+  const output = text.split(/^## Output$/m)[1]?.split(/^## /m)[0] ?? '';
+  assert.ok(output, 'reviewer.md has an ## Output section');
+  const dispositions = ['ship', 'fix', 'recapture'];
+  const tags = ['fix', 'adaptation', 'ask'];
+  // Exactly these dispositions, each as `disposition: <word>`.
+  const offered = new Set([...output.matchAll(/disposition: ([a-z]+)/g)].map((m) => m[1]));
+  assert.deepEqual([...offered].sort(), [...dispositions].sort());
+  // Exactly these tags, each in backticks; no other bare word is offered.
+  const words = new Set([...output.matchAll(/`([a-z]+)`/g)].map((m) => m[1]));
+  assert.deepEqual([...words].sort(), [...tags].sort());
+  assert.match(output, /^`?<tag> <element>: saw <x>, expected <y> \(<evidence file>\)`?$/m);
+  assert.match(text, /https:\/\/github\.com\/pbakaus\/impeccable/);
+  assert.match(text, /Apache-2\.0/);
+});
