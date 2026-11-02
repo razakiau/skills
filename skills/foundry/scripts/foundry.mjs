@@ -737,10 +737,18 @@ export function hookLine(top) {
   return `foundry: ${missing.length} missing for ${s.stage} (${names}), ${open} interview(s) queued; run foundry to see them.\n`;
 }
 
+// The nearest folder up from cwd holding .git (a dir, or a file in a worktree); the hook's repoTop without a git spawn.
+export function nearestTop(cwd = process.cwd()) {
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    if (dirname(dir) === dir) return cwd;
+  }
+}
+
 // SessionStart hook: prints its line or nothing. Always exits 0 and stays silent on any error.
 function hook() {
   try {
-    const line = hookLine(repoTop());
+    const line = hookLine(nearestTop());
     if (line) process.stdout.write(line);
   } catch {
     // A session must start whatever state the repo is in.

@@ -1406,6 +1406,18 @@ test('hook: live counts docs/runbooks/ only as a directory', () => {
   assert.equal(run(repo, ['hook']).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
 });
 
+test('hook: from a subfolder and from a linked worktree it finds the repo top without git', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  mkdirSync(join(repo, 'src', 'deep'), { recursive: true });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  assert.equal(r.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
+  const wt = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-wt-'))) + '/w';
+  git(repo, 'worktree', 'add', '-q', wt);
+  assert.equal(foundry.nearestTop(join(wt)), wt);
+  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  assert.equal(w.stdout, r.stdout);
+});
+
 test('hook: any error exits 0 and prints nothing', () => {
   const corrupt = makeRepo({ '.agents/foundry.json': '{ not json' });
   for (const state of [null, { stage: 'nope' }, { stage: 'product', queue: 'x' }]) {
