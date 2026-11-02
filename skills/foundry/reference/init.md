@@ -31,7 +31,7 @@ Done: the output is shown, and each `warn` line has the owner's answer.
 The script does not write the queue. Edit `.agents/foundry.json` yourself and append to `queue`. Keep 2-space JSON with one key per line, as the script writes it: `.agents/doc-check.sh` reads the file line by line.
 Each entry is `{"interview": ..., "when": ..., "provider": ..., "done": false}`. Leave out `provider` when only the fallback applies. Queue what the stage opens:
 
-- `design brief and DESIGN.md`, when `before the first screen`, only with UI. Provider: Impeccable `init` and `document`, else the fallback questions.
+- `design brief and DESIGN.md`, when `before the first screen`, only with UI. Provider: Impeccable `init` and `document`, else the fallback questions. The screen map, `docs/ui/screens.md`, needs no interview: `init-files` writes it at product with UI, and check-screens fills it in as screens are built.
 - `code map`, when `at the first change that touches two modules`. Provider: strategic-programming, else its `reference/code-map.md` template.
 - `glossary`, when `when a second domain term is disputed, or at the first decision`.
 - `quality bar`, when `before the first PR at product`.

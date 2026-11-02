@@ -57,9 +57,13 @@ For the same theme, its rows win over the seed rows. Never copy its contents int
 | design-system | ui-ux-pro-max `design-system` | skill | MIT | [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/main/.claude/skills/design-system) |  |
 | design-system | Mobbin MCP (design references) | mcp | MIT | [mobbin/mobbin-mcp-server](https://github.com/mobbin/mobbin-mcp-server) |  |
 | design-system | image generation MCP (design references) | mcp | n/a | self-hosted |  |
+| design-system | check-screens (approved mockups, the screen map) | skill | MIT | [razakiau/skills](https://github.com/razakiau/skills/tree/main/skills/check-screens) |  |
 | design-system | ask the owner | fallback | MIT | n/a | yes |
+| screens | check-screens | skill | MIT | [razakiau/skills](https://github.com/razakiau/skills/tree/main/skills/check-screens) |  |
+| screens | `templates/screens.md` | fallback | MIT | [templates/screens.md](../templates/screens.md) | yes |
 | quality-bar | constraint-driven-development | skill | MIT | [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills/tree/main/skills/constraint-driven-development) |  |
 | quality-bar | `templates/CONSTRAINTS.md` | fallback | MIT | [templates/CONSTRAINTS.md](../templates/CONSTRAINTS.md) | yes |
+| verification | check-screens (UI changes) | skill | MIT | [razakiau/skills](https://github.com/razakiau/skills/tree/main/skills/check-screens) |  |
 | verification | pm `derive-tests` | skill | MIT | [phuryn/pm-skills](https://github.com/phuryn/pm-skills/blob/main/pm-ai-shipping/commands/derive-tests.md) |  |
 | verification | tdd | skill | MIT | [mattpocock/skills](https://github.com/mattpocock/skills/tree/main/skills/engineering/tdd) |  |
 | verification | webapp-testing | skill | Apache-2.0 | [anthropics/skills](https://github.com/anthropics/skills/tree/main/skills/webapp-testing) |  |

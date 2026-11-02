@@ -36,11 +36,13 @@ export function writeState(top, state) {
   writeFileSync(path, JSON.stringify(state, null, 2) + '\n');
 }
 
-// Required files per stage, cumulative. DESIGN.md applies only when the repo has UI.
+// Required files per stage, cumulative. The UI_ONLY files apply only when the repo has UI.
 const EXPLORE_FILES = ['AGENTS.md'];
-const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'CONSTRAINTS.md'];
+const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
 const LIVE_FILES = [...PRODUCT_FILES, 'docs/threat-model.md', 'docs/runbooks/'];
 export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: LIVE_FILES, scale: LIVE_FILES };
+export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
+export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi || !UI_ONLY.includes(f));
 
 const COPILOT_SESSIONS = () => join(homedir(), '.copilot', 'session-state');
 
@@ -180,7 +182,7 @@ export function signals(top, opts = {}) {
   }
   if (!reasons.length) reasons.push('no signal beyond explore');
 
-  const required = REQUIRED[proposed].filter((f) => f !== 'DESIGN.md' || has_ui);
+  const required = requiredFor(proposed, has_ui);
   const fileMap = Object.fromEntries(required.map((f) => [f, present(top, f)]));
 
   return { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons };
@@ -257,6 +259,7 @@ const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates
 const DOC_CHECK = '.agents/doc-check.sh';
 const CHECK_SH = '.agents/check.sh';
 const SECURITY_LINE = 'The reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed.';
+const UI_LINE = 'After any UI change, run check-screens before reporting done.';
 
 // Files init-files writes per stage, as [repo path, template]. DESIGN.md and .agents/code-map.md belong to providers.
 const PRODUCT_TEMPLATES = [
@@ -266,6 +269,8 @@ const PRODUCT_TEMPLATES = [
 ];
 const LIVE_TEMPLATES = [...PRODUCT_TEMPLATES, ['docs/threat-model.md', 'threat-model.md'], ['docs/runbooks/README.md', 'runbook.md']];
 const STAGE_TEMPLATES = { explore: [], product: PRODUCT_TEMPLATES, live: LIVE_TEMPLATES, scale: LIVE_TEMPLATES };
+// Written only when the repo has UI. The same template ships with check-screens, which keeps the map true.
+const UI_TEMPLATES = [['docs/ui/screens.md', 'screens.md']];
 
 // What `## Where things are` may link to, in order, when the file will exist.
 const LINKS = [
@@ -275,6 +280,7 @@ const LINKS = [
   ['.agents/code-map.md', 'the module by module map'],
   ['GLOSSARY.md', 'the words this project uses'],
   ['DESIGN.md', 'the visual design system'],
+  ['docs/ui/screens.md', 'every screen, its approved mockup and its last check'],
   ['CONSTRAINTS.md', 'the limits the project works within'],
   ['docs/decisions/index.md', 'product-level decisions'],
   ['docs/threat-model.md', 'what we protect and from whom'],
@@ -338,21 +344,25 @@ function planCheck(top) {
 const linkedFiles = (willExist) => LINKS.filter(([f]) => willExist(f));
 const hasSecurityLine = (stage) => stage !== 'explore';
 
-function agentsMd(stage, name, check, willExist) {
+const hasUiLine = (stage, hasUi) => hasUi && stage !== 'explore';
+
+function agentsMd(stage, name, check, willExist, hasUi) {
   const links = linkedFiles(willExist).map(([f, what]) => `- [${f}](${f}): ${what}.`);
   let text = template('AGENTS.md')
     .replace('{{name}}', name)
     .replace('{{check}}', check)
     .replace('{{links}}', links.length ? links.join('\n') : 'Nothing yet beyond this file.');
   if (!hasSecurityLine(stage)) text = text.replace(`${SECURITY_LINE}\n`, '');
+  if (!hasUiLine(stage, hasUi)) text = text.replace(`${UI_LINE}\n`, '');
   return text;
 }
 
 // What a kept AGENTS.md lacks against the one agentsMd would write at this stage, as `agents-md:` lines.
-function agentsMdGaps(text, stage, willExist) {
+function agentsMdGaps(text, stage, willExist, hasUi) {
   const linked = (f) => text.includes(`](${f})`) || text.includes(`](./${f})`) || text.includes(`](${f}#`);
   const gaps = linkedFiles(willExist).filter(([f]) => !linked(f)).map(([f]) => `agents-md: add link to ${f}`);
   if (hasSecurityLine(stage) && !text.includes(SECURITY_LINE)) gaps.push(`agents-md: add line: ${SECURITY_LINE}`);
+  if (hasUiLine(stage, hasUi) && !text.includes(UI_LINE)) gaps.push(`agents-md: add line: ${UI_LINE}`);
   return gaps;
 }
 
@@ -381,20 +391,22 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   const writes = [];
   const reported = [];
   const exists = (f) => existsSync(join(top, f));
-  const docs = STAGE_TEMPLATES[stage].filter(([f]) => !skip.includes(f));
+  const current = readState(top);
+  const hasUi = current ? current.has_ui === true : signals(top).has_ui;
+  const uiDocs = hasUi && stage !== 'explore' ? UI_TEMPLATES : [];
+  const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f));
   const written = new Set(docs.filter(([f]) => !exists(f)).map(([f]) => f));
   const willExist = (f) => !skip.includes(f) && (written.has(f) || exists(f));
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
-  const current = readState(top);
   reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
-    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist));
+    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi));
   } else if (agentsExisted) lines.push('kept AGENTS.md (exists, unmigrated)');
   else {
-    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist)]);
+    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi)]);
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
@@ -406,7 +418,7 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   const nextState = current
     ? { ...current, doc_check_version: docCheckVersion }
     : {
-      version: 1, stage, stage_set: today(), stage_reason: 'init', has_ui: signals(top).has_ui,
+      version: 1, stage, stage_set: today(), stage_reason: 'init', has_ui: hasUi,
       agents_md: { budget_lines: 100, state: agentsExisted ? 'unmigrated' : 'migrated' },
       readiness_tier: 0, providers: {}, queue: [], garden_last: null, doc_check_version: docCheckVersion,
     };
@@ -595,7 +607,7 @@ export function hookLine(top) {
   if (!Object.hasOwn(REQUIRED, s.stage)) throw new FoundryError(`unknown stage ${s.stage}`, 1);
   const queue = s.queue ?? [];
   if (!Array.isArray(queue)) throw new FoundryError('queue is not a list', 1);
-  const missing = REQUIRED[s.stage].filter((f) => (f !== 'DESIGN.md' || s.has_ui === true) && !present(top, f));
+  const missing = requiredFor(s.stage, s.has_ui === true).filter((f) => !present(top, f));
   const open = queue.filter((q) => q && q.done === false).length;
   if (!missing.length && !open) return null;
   const names = missing.length ? missing.slice(0, 2).join(', ') : 'none';

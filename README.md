@@ -122,6 +122,8 @@ Foundry never installs a skill or MCP server. It names the provider, why, a link
 
 Some interviews wait for their moment: a design interview before the first screen, a threat model on entering `live`. They sit in a queue in the state file.
 
+A repository with UI also gets a screen map at `product`: `docs/ui/screens.md`, the same file [`check-screens`](#check-screens) keeps, and the AGENTS.md line that sends agents to it after a UI change. `garden` reports stale screens when check-screens is installed.
+
 ### The session-start hook
 
 With the plugin installed, a hook prints one line when a session starts in a repository that has `.agents/foundry.json` and something to do:

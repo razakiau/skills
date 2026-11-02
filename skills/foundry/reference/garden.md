@@ -21,24 +21,30 @@ Read AGENTS.md, CONSTRAINTS.md and `.agents/code-map.md` when they exist. In the
 
 Done: each kind is listed with its findings, or as "none".
 
-### 3. Report with evidence
+### 3. Stale screens
+
+Only when the state has `has_ui: true` and check-screens is installed. `<check-screens dir>` is the folder holding check-screens' SKILL.md. Run `node <check-screens dir>/scripts/check-screens.mjs stale` from the repo. Each `stale`, `gone` or `unmapped` line it prints is a finding; report them with the others in step 4.
+Without check-screens, say the screen map was not checked and name check-screens as its provider.
+Done: the stale lines are in the findings, or you said why the map was not checked.
+
+### 4. Report with evidence
 
 Give each finding with `file:line` evidence from the range and one line on why it matters.
 For each finding that recurs, in two places or more, propose the check that would have caught it: a script, a lint rule or a test, and where it runs.
 Done: every finding has `file:line` evidence, and every recurring one has a proposed check.
 
-### 4. Offer issues
+### 5. Offer issues
 
 Read `providers` in the state. When a tracker provider is recorded for gardening, such as the Linear or GitHub MCP, offer to open one issue per finding. Open them only on the owner's yes.
 With no tracker, say the report is the record.
 Done: issues are offered, or you said there is no tracker.
 
-### 5. Mark the pass
+### 6. Mark the pass
 
 After the owner has read the report, run `node <skill dir>/scripts/foundry.mjs garden-range --mark`. It sets `garden_last` to HEAD, so the next pass starts here.
 Done: the script printed `garden_last: <sha>`.
 
-### 6. Scheduling
+### 7. Scheduling
 
 The schedule is the owner's. Say that this pass can run from CI or a cron, and that it reports the same way there.
 Done: the owner knows it can be scheduled.
