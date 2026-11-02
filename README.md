@@ -1,12 +1,13 @@
 # skills
 
-Three agent skills, packaged as one plugin for Claude Code, GitHub Copilot CLI and VS Code.
+Four agent skills, packaged as one plugin for Claude Code, GitHub Copilot CLI and VS Code.
 
 | Skill | What it does |
 |---|---|
 | [`no-slop`](skills/no-slop/SKILL.md) | Edits prose so it reads like its writer, or audits it for AI-writing patterns without rewriting. |
 | [`strategic-programming`](skills/strategic-programming/SKILL.md) | Places a code change in the layer that owns it, then measures the diff and makes the agent answer for what it added. |
 | [`foundry`](skills/foundry/SKILL.md) | Gives a repository a stage, writes the docs that stage requires for agents, and audits it before real users arrive. |
+| [`check-screens`](skills/check-screens/SKILL.md) | Before the agent says a UI change is done, it captures the changed screens and has a fresh reviewer compare them with the approved mockup. |
 
 ## Install
 
@@ -138,9 +139,42 @@ When nothing is missing and no interview is queued, or the repository has no sta
 
 Tests: `node --test skills/foundry/scripts/foundry.test.mjs`.
 
+## check-screens
+
+An agent that changes a screen usually reports it done without looking at it. This skill makes it look first. It captures each touched screen at 360 px and 1440 px, light and dark, and hands the captures to a fresh reviewer subagent with the approved mockup, one or two sibling screens and the design tokens. The reviewer did not build the change and gets only its one-line intent. It returns `disposition: ship`, `fix` or `recapture`, with one tagged line per difference. The agent fixes the `fix` items and reviews again, at most 3 rounds, then reports with the final captures inline.
+
+The skill keeps a screen map, `docs/ui/screens.md`, with each screen's route, files, siblings, approved mockup and last capture, so the next change starts from it instead of grepping routes. Only the owner approves a mockup or a capture.
+
+**To start**, make a UI change; the agent runs the skill before it says done. To make that dependable, add this line to the repo's AGENTS.md:
+
+```text
+After any UI change, run check-screens before reporting done.
+```
+
+The bundled script handles the map and the captures:
+
+```sh
+node skills/check-screens/scripts/check-screens.mjs init
+node skills/check-screens/scripts/check-screens.mjs touched
+node skills/check-screens/scripts/check-screens.mjs capture --url http://localhost:5173/report --screen report
+node skills/check-screens/scripts/check-screens.mjs record report
+```
+
+`init` writes the map, `map` queries it, `touched` lists the screens a change touches, `capture` writes the PNGs, `record` stores the last capture, `approve` records the owner's approval and `stale` reports out-of-date entries. The full table is in [`SKILL.md`](skills/check-screens/SKILL.md#commands), and the loop is in [`reference/loop.md`](skills/check-screens/reference/loop.md).
+
+### Requirements
+
+- Node.js 18 or later, and git for `touched`.
+- Playwright is optional. `capture` uses the app's own `playwright` or `@playwright/test` and brings none of its own. Without it, the agent captures with a browser MCP ([`reference/providers.md`](skills/check-screens/reference/providers.md)). With no browser at all, it reports the screen as not checked.
+
+How the reviewer and the trigger were tested: [`eval/seeded-defect.md`](skills/check-screens/eval/seeded-defect.md) and [`eval/trigger.md`](skills/check-screens/eval/trigger.md).
+
+Tests: `node --test skills/check-screens/scripts/check-screens.test.mjs`.
+
 ## Credits
 
 - `no-slop` merges [blader/humanizer](https://github.com/blader/humanizer) 3.1.0 by Siqi Chen and [petergyang/no-ai-slop](https://github.com/petergyang/no-ai-slop) by Peter Yang, both MIT.
+- `check-screens` takes the shape of its reviewer brief (disposition first, checks in a fixed order, edit nothing) from the finish reviewer of [impeccable](https://github.com/pbakaus/impeccable) by Paul Bakaus (Apache-2.0).
 - `strategic-programming` adapts the test gate, the junk-test list and the cleanup list from OpenClaw's `test-audit` and `deslop` skills (MIT). It takes *strategic programming* and the *tactical tornado* from John Ousterhout's *A Philosophy of Software Design*, and ideas from Matt Pocock's `codebase-design` (the deletion test), NeoLabHQ's context-engineering-kit (the kinds of duplication), Addy Osmani's `code-simplification` and matklad's `ARCHITECTURE.md` convention (the code map).
 
 ## License

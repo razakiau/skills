@@ -1,6 +1,6 @@
 ---
 name: check-screens
-description: Use after changing any screen, page or UI component, before saying it is done. Captures the running app at phone and desktop sizes, has a fresh reviewer compare it with the approved mockup and sibling screens, and keeps the screen map. Backend-only changes skip it.
+description: Load for any task that adds, changes or fixes a screen, page, layout or UI component (features, mobile layout bugs, restyles) or a mockup (record, compare, "does it match"), alongside other skills. It checks the running app before you say done. Skip for backend-only work.
 license: MIT
 metadata:
   version: "1.0.0"
@@ -10,6 +10,7 @@ metadata:
 
 Run this after any change that touches a screen, and before you say the change is done. You look at your own result first, at phone and desktop sizes, so the owner does not have to.
 The screen map, `docs/ui/screens.md`, records each screen's route, files, siblings, approved mockup and last capture ([reference/map.md](reference/map.md)). Read it instead of grepping routes.
+For a dependable trigger, add this line to the repo's AGENTS.md: "After any UI change, run check-screens before reporting done."
 
 ## Setup
 

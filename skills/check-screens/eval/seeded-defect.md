@@ -1,6 +1,6 @@
 # Seeded-defect check for the reviewer
 
-This check asks one question: does a fresh reviewer, given only the brief in [reviewer.md](../reference/reviewer.md), catch two planted visual defects, and does it leave a clean screen alone?
+This check tests whether a fresh reviewer, given only the brief in [reviewer.md](../reference/reviewer.md), catches two planted visual defects and leaves a clean screen alone.
 
 It has two arms with the same inputs, except for one capture:
 
