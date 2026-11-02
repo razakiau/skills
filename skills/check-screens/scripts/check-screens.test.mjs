@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -480,6 +480,26 @@ test('touched: untracked files count, against a base', () => {
   assert.equal(r.stdout, 'screen report (src/report.tsx)\nshared src/theme.css\n  used by home\n');
 });
 
+test('touched: before the first commit every file is new', () => {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'check-screens-nocommit-')));
+  git(repo, 'init', '-q', '-b', 'main');
+  write(repo, 'docs/ui/screens.md', HOME_MAP);
+  write(repo, 'src/home.tsx', 'export default 1;\n');
+  const r = run(repo, ['touched']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'screen home (src/home.tsx)\n');
+  const named = run(repo, ['touched', 'HEAD']);
+  assert.equal(named.code, 1);
+  assert.equal(named.stderr, 'check-screens: unknown base HEAD: not a commit in this repo (no commits yet; run touched with no base)\n');
+});
+
+test('touched: an unknown base says so', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': HOME_MAP, 'src/home.tsx': 'x\n' });
+  const r = run(repo, ['touched', 'no-such-branch']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'check-screens: unknown base no-such-branch: not a commit in this repo\n');
+});
+
 test('touched: not git exits 2', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'check-screens-nogit-')));
   write(dir, 'docs/ui/screens.md', HOME_MAP);
@@ -527,6 +547,18 @@ test('record: a name that is not a slug, with states and a custom --out', () => 
   assert.equal(r.code, 0, r.stderr);
   assert.match(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'),
     new RegExp(`^last-capture: ${today()} ${fileHash(repo, 'src/a.tsx, src/b.tsx')} 360-dark-empty 360-light$`, 'm'));
+});
+
+test('record: captures older than the screen files are refused, map unchanged', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, '.check-screens/captures/home-360-light.png', 'png');
+  write(repo, '.check-screens/captures/home-1440-light.png', 'png');
+  const past = new Date(Date.now() - 60_000);
+  utimesSync(join(repo, '.check-screens/captures/home-360-light.png'), past, past);
+  const r = run(repo, ['record', 'home']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'check-screens: captures of home are older than its files (they changed after the capture): home-360-light.png; capture again\n');
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
 });
 
 test('record: no captures exits 1', () => {
@@ -787,7 +819,7 @@ test('skill: description ≤ 300 chars, names screen and mockup, says what skips
   const fm = frontmatter(text);
   assert.equal(fm.name, 'check-screens');
   assert.equal(fm.license, 'MIT');
-  assert.match(text, /^metadata:\n  version: "1\.0\.0"$/m);
+  assert.match(text, /^metadata:\n  version: "1\.1\.0"$/m);
   const d = fm.description;
   assert.ok(d && d.length <= 300, `description is ${d?.length} chars`);
   assert.match(d, /screen/i);
@@ -811,6 +843,18 @@ test('skill: every reference link resolves', () => {
       assert.ok(existsSync(join(SKILL_DIR, 'reference', m[1])), `reference/${ref} links ${m[1]}`);
     }
   }
+});
+
+test('providers: the local overlay is native only, and its example exists', () => {
+  const text = readSkill('reference/providers.md');
+  const section = text.split(/^## Local overlay$/m)[1]?.split(/^## /m)[0] ?? '';
+  assert.match(section, /~\/\.config\/check-screens\/local\.md/);
+  assert.match(section, /Web needs always use the table/);
+  assert.match(section, /Never copy/);
+  const example = readSkill('templates/local.md.example');
+  const needs = example.split('\n').filter((l) => /^\| [A-Z]/.test(l) && !l.startsWith('| Need ')).map((l) => l.split('|')[1].trim());
+  assert.deepEqual(needs, ['Capture native', 'Measure native']);
+  assert.match(readSkill('SKILL.md'), /~\/\.config\/check-screens\/local\.md/);
 });
 
 test('skill: command table matches the CLI', () => {

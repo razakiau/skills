@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -371,6 +371,24 @@ function gitLines(top, args) {
     .split('\n').filter(Boolean);
 }
 
+const commitOf = (top, rev) => {
+  try {
+    return execFileSync('git', ['rev-parse', '--verify', '-q', `${rev}^{commit}`], { cwd: top, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null;
+  }
+};
+
+// The tree or commit to diff against. Before the first commit the default base is the empty tree, so every file is new.
+function diffBase(top, base, given) {
+  if (commitOf(top, base)) return base;
+  if (!given && !commitOf(top, 'HEAD')) {
+    return execFileSync('git', ['hash-object', '-t', 'tree', '--stdin'], { cwd: top, input: '', encoding: 'utf8' }).trim();
+  }
+  const hint = commitOf(top, 'HEAD') ? '' : ' (no commits yet; run touched with no base)';
+  throw new CheckScreensError(`unknown base ${base}: not a commit in this repo${hint}`, 1);
+}
+
 function touchedCmd(args) {
   const { positionals } = parseArgs(args, { positionals: 1 });
   const base = positionals[0] ?? 'HEAD';
@@ -383,10 +401,11 @@ function touchedCmd(args) {
   const top = repoTop(cwd);
   const { text } = readMap(top);
   const { screens } = parseMap(text);
+  const from = diffBase(top, base, positionals.length > 0);
   let changed;
   try {
     changed = [...new Set([
-      ...gitLines(top, ['diff', '--name-only', base, '--']),
+      ...gitLines(top, ['diff', '--name-only', from, '--']),
       ...gitLines(top, ['ls-files', '--others', '--exclude-standard']),
     ])].sort();
   } catch {
@@ -454,6 +473,9 @@ function recordCmd(args) {
   if (outside.length) throw new CheckScreensError(`a file of ${entry.name} is outside the repo: ${outside.join(', ')}`, 1);
   const hash = fileHash(top, entry.fields.file);
   if (!hash) throw new CheckScreensError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
+  const newest = Math.max(...list(entry.fields.file).map((f) => statSync(join(top, f)).mtimeMs));
+  const old = files.filter((f) => statSync(join(dir, f)).mtimeMs < newest);
+  if (old.length) throw new CheckScreensError(`captures of ${entry.name} are older than its files (they changed after the capture): ${old.join(', ')}; capture again`, 1);
   const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();
   writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'last-capture', `${today()} ${hash} ${variants.join(' ')}`));
   process.stdout.write(`recorded ${entry.name}: ${variants.join(' ')}\n`);
