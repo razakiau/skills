@@ -9,7 +9,7 @@ metadata:
 # check-screens
 
 Run this after any change that touches a screen, and before you say the change is done. You look at your own result first, at phone and desktop sizes, so the owner does not have to.
-The screen map, `docs/ui/screens.md`, records each screen's route, files, siblings, approved mockup and last capture ([reference/map.md](reference/map.md)). Read it instead of grepping routes.
+The screen map, `docs/ui/screens.md`, records each screen's route, files, siblings, approved mockup and last capture ([reference/map.md](reference/map.md)). Read it instead of grepping routes. In a monorepo where the app is not at the repo top, put a `Screen map: <path>` line in AGENTS.md and set `CHECK_SCREENS_PLAYWRIGHT_FROM` to the app folder ([reference/map.md](reference/map.md)).
 For a dependable trigger, add this line to the repo's AGENTS.md: "After any UI change, run check-screens before reporting done."
 
 ## Setup

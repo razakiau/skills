@@ -106,6 +106,10 @@ Recorded before the skill was renamed from ui-check; the reviewer brief was the 
 
 The six runs were blind: each reviewer got a folder named `r1` to `r6`, with the arms shuffled at random. Defect arm: both defects named in 3 of 3. Clean arm: `ship` in 3 of 3. Every defect run measured the gap as about 14 px against 16 px from card positions, and read the tan as off-token from `tokens.css`. No reviewer reported an item the fixtures did not plant.
 
+## Limits
+
+No negative control was run with a weakened reviewer brief, so these runs show that this brief catches these two defects, not that a weaker brief would miss them.
+
 ## Replies
 
 The three clean runs (r1, r4, r5) each returned `disposition: ship`, then `none`. The `fix` lines of the three defect runs, as they came:
