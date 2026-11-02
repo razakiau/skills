@@ -20,7 +20,7 @@ For each open theme, say one of:
 
 - covered: name the file that holds it, or the provider recorded in `providers` in the state;
 - missing: no file and no provider;
-- stale: the file exists but the check flags it, or it contradicts the code you read.
+- stale: the file exists but the check flags it, or it contradicts the code you read. A code map still at `.agents/code-map.md` (`code_map_legacy` in the signals) is stale: grow moves it to `docs/code-map.md`.
 
 Done: every open theme has one of the three, with its evidence.
 

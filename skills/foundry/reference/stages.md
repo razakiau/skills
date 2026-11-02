@@ -26,7 +26,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
@@ -36,12 +36,13 @@ It adds:
 - PRODUCT.md: intent, users, non-goals, and the rules that hold everywhere.
 - A decisions folder with an index, and a glossary.
 - ARCHITECTURE.md plus the code map.
-- DESIGN.md before the first screen is built.
+- DESIGN.md before the first screen is built. It may live below the top, such as `web/DESIGN.md`: record the path with `state --set design_md=<path>`, and every check reads it there.
 - With UI, a screen map in `docs/ui/screens.md`: each screen, its approved mockup and when it was last checked. check-screens keeps it true; AGENTS.md gets the line "After any UI change, run check-screens before reporting done."
 - CONSTRAINTS.md, the quality bar.
 - One `check` command that runs the build, lint, tests and the doc check.
-- A "how to verify" section in AGENTS.md. It names the command that starts the app and the tool an agent uses to check it.
-- A security pass in review. The reviewer of each change also reads it for access control, input handling and secrets.
+- A "how to verify" section in AGENTS.md. It names the command that starts the app and the tool an agent uses to check it (browser, mobile, HTTP).
+- A security pass in review. The reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed.
+- A short spec for any change bigger than a day, kept next to the code, before the work starts.
 
 Nothing is added to CI at this stage.
 
@@ -56,7 +57,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
@@ -71,6 +72,7 @@ It adds:
 - A live pentest per release, run by the owner with the recommended provider.
 - Runbooks for what can break.
 - Error tracking, and backups with a tested restore.
+- Change notes written with each change, and one release command that versions, tags and publishes them.
 
 ## scale
 
@@ -83,7 +85,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`

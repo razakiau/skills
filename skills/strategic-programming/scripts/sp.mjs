@@ -428,12 +428,18 @@ function readTestBeside(top, base, files) {
   return out;
 }
 
-// Path entries of the first Markdown table in .agents/code-map.md whose header has a Path
+// The code map lives in docs/, where search tools look; .agents/ was its first home and still counts.
+const CODE_MAPS = [['docs', 'code-map.md'], ['.agents', 'code-map.md']];
+const codeMapPath = (top) => CODE_MAPS.map((p) => join(top, ...p)).find((f) => existsSync(f)) ?? null;
+
+// Path entries of the first Markdown table in the code map whose header has a Path
 // column (any case), outside ``` and ~~~ fences. null when the file is missing, 'no-path'
 // when it has no such table.
 function readCodeMap(top) {
   let text;
-  try { text = readFileSync(join(top, '.agents', 'code-map.md'), 'utf8'); } catch { return null; }
+  const file = codeMapPath(top);
+  if (!file) return null;
+  try { text = readFileSync(file, 'utf8'); } catch { return null; }
   const cells = (line) => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim());
   const rows = text.split('\n');
   let fence = null;
@@ -668,7 +674,7 @@ function hookRepos(payload) {
   if (!own) return [];
   const out = [];
   const add = (paths, isOwn) => {
-    if (!existsSync(join(paths.top, '.agents', 'code-map.md'))) return;
+    if (!codeMapPath(paths.top)) return;
     mkdirSync(paths.state, { recursive: true });
     out.push({ ...paths, own: isOwn });
   };
@@ -676,7 +682,7 @@ function hookRepos(payload) {
   const list = tryGit(['worktree', 'list', '--porcelain'], { cwd: own.top }) ?? '';
   for (const line of list.split('\n')) {
     const dir = line.startsWith('worktree ') ? line.slice(9) : null;
-    if (!dir || resolve(dir) === resolve(own.top) || !existsSync(join(dir, '.agents', 'code-map.md'))) continue;
+    if (!dir || resolve(dir) === resolve(own.top) || !codeMapPath(dir)) continue;
     const paths = repoPaths(dir, { mkdir: false });
     if (paths && paths.top !== own.top) add(paths, false);
   }

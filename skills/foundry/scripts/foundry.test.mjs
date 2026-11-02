@@ -115,7 +115,7 @@ test('state: rejects bad values and unknown keys, exit 2', () => {
     ['has_ui=yes', 'foundry: has_ui must be true or false\n'],
     ['readiness_tier=x', 'foundry: readiness_tier must be a whole number\n'],
     ['agents_md.state=old', 'foundry: agents_md.state must be one of migrated, unmigrated\n'],
-    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui\n'],
+    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md\n'],
     ['stage', 'foundry: --set needs key=value\n'],
   ]) {
     const r = run(repo, ['state', '--set', arg]);
@@ -169,7 +169,7 @@ function sessionsRoot(entries) {
 }
 
 test('REQUIRED: cumulative per stage, in order', () => {
-  const product = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
+  const product = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
   const live = [...product, 'docs/threat-model.md', 'docs/runbooks/'];
   assert.deepEqual(REQUIRED, { explore: ['AGENTS.md'], product, live, scale: live });
   assert.deepEqual(UI_ONLY, ['DESIGN.md', 'docs/ui/screens.md']);
@@ -200,6 +200,76 @@ test('signals: non-git dir', () => {
   assert.equal(s.age_days, 0);
   assert.equal(s.proposed, 'explore');
   assert.deepEqual(s.files, { 'AGENTS.md': true });
+});
+
+test('signals: a non-git walk skips node_modules', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-nogit-')));
+  write(dir, 'node_modules/pkg/App.tsx', 'x');
+  write(dir, 'node_modules/pkg/src/auth.ts', 'x');
+  const s = signals(dir, NO_SESSIONS);
+  assert.equal(s.has_ui, false);
+  assert.deepEqual(s.auth_code, []);
+});
+
+test('signals: a folder without git inside another repo has no history of its own', () => {
+  const parent = makeRepo({ 'a.txt': 'x' });
+  for (let i = 0; i < 31; i++) git(parent, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  write(parent, 'sub/AGENTS.md', 'x\n');
+  const s = signals(join(parent, 'sub'), NO_SESSIONS);
+  assert.equal(s.commits, 0);
+  assert.equal(s.first_commit, null);
+  assert.equal(s.proposed, 'explore');
+  assert.deepEqual(s.files, { 'AGENTS.md': true });
+  assert.equal(s.behind, null);
+});
+
+test('signals: a deploy workflow is found whatever its case', () => {
+  const repo = makeRepo({ '.github/workflows/ship.yml': 'jobs:\n  Deploy:\n    runs-on: x\n', 'src/auth/login.ts': 'x' });
+  const s = signals(repo, NO_SESSIONS);
+  assert.deepEqual(s.deployed, ['.github/workflows/ship.yml']);
+  assert.equal(s.proposed, 'live');
+});
+
+test('signals --as-of reads the tree and the age of a past commit', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  const env = { GIT_AUTHOR_DATE: '2026-01-01T12:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T12:00:00Z' };
+  execFileSync('git', ['commit', '-q', '--amend', '--no-edit', '--reset-author'], { cwd: repo, env: { ...process.env, ...env } });
+  const at = (d) => ({ ...process.env, GIT_AUTHOR_DATE: d, GIT_COMMITTER_DATE: d });
+  write(repo, 'src/App.tsx', 'x');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['commit', '-q', '-m', 'ui'], { cwd: repo, env: at('2026-01-10T12:00:00Z') });
+  write(repo, 'PRODUCT.md', 'p');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['commit', '-q', '-m', 'product'], { cwd: repo, env: at('2026-02-01T12:00:00Z') });
+  const early = signals(repo, { ...NO_SESSIONS, asOf: '2026-01-05' });
+  assert.equal(early.commits, 1);
+  assert.equal(early.age_days, 4);
+  assert.equal(early.has_ui, false);
+  assert.equal(early.proposed, 'explore');
+  assert.equal(early.sessions, null);
+  const mid = signals(repo, { ...NO_SESSIONS, asOf: '2026-01-10' });
+  assert.equal(mid.has_ui, true);
+  assert.equal(mid.proposed, 'product', 'nine days old');
+  assert.equal(mid.files['PRODUCT.md'], false, 'PRODUCT.md came later');
+  const sha = git(repo, 'rev-parse', 'HEAD~1');
+  assert.equal(signals(repo, { ...NO_SESSIONS, asOf: sha }).as_of, sha);
+  const cli = run(repo, ['signals', '--as-of', '2026-01-05']);
+  assert.equal(cli.stdout, `proposed stage as of ${git(repo, 'rev-parse', 'HEAD~2').slice(0, 7)}: explore\n- no signal beyond explore\n`);
+  const bad = run(repo, ['signals', '--as-of', '2025-01-01']);
+  assert.deepEqual([bad.code, bad.stderr], [2, 'foundry: --as-of 2025-01-01: no commit on or before that date\n']);
+  assert.equal(run(repo, ['signals', '--as-of']).code, 2);
+});
+
+test('signals: a checkout far behind its upstream says so', () => {
+  const origin = makeRepo({ 'a.txt': 'x' });
+  const clone = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-clone-')));
+  execFileSync('git', ['clone', '-q', origin, clone]);
+  for (let i = 0; i < 10; i++) git(origin, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  git(clone, 'fetch', '-q');
+  const s = signals(clone, NO_SESSIONS);
+  assert.deepEqual(s.behind, { ref: 'origin/main', commits: 10 });
+  assert.match(run(clone, ['signals']).stdout, /^warn: 10 commits behind origin\/main; pull before trusting the files list$/m);
+  assert.equal(signals(origin, NO_SESSIONS).behind, null, 'no upstream');
 });
 
 test('signals: git repo with no commits yet', () => {
@@ -493,6 +563,24 @@ test('doc-check: required lists REQUIRED[stage] in order', () => {
   assert.equal(ok.code, 0, ok.stdout);
 });
 
+test('doc-check: a state file on one line warns instead of reading as explore', () => {
+  const r = docCheck(docRepo({ '.agents/foundry.json': JSON.stringify(docState()) + '\n' }));
+  assert.deepEqual(findings(r, 'state'), ['doc-check: WARN state: .agents/foundry.json has no stage on its own line; write it 2-space, one key per line']);
+});
+
+test('doc-check: a command continued with a backslash is one command', () => {
+  const agents = AGENTS_OK.replace('cd .\n```', 'cd .\nsh \\\n  .agents/doc-check.sh\nnot-a-real-cmd-x \\\n  --flag\n```');
+  const r = docCheck(docRepo({ 'AGENTS.md': agents }));
+  assert.deepEqual(findings(r, 'command').map((l) => l.replace(/:\d+ /, ':N ')), ['doc-check: FAIL command: AGENTS.md:N not-a-real-cmd-x not found']);
+});
+
+test('doc-check: links inside ~~~ fences and code spans are not checked; ./ decision links count once', () => {
+  const agents = AGENTS_OK + '\n~~~\n[x](nope.md)\n~~~\n\nUse `[y](nope2.md)` here.\n';
+  const r = docCheck(docRepo({ 'AGENTS.md': agents, 'docs/decisions/index.md': '# Decisions\n\n- [start](./0001-start.md)\n- [gone](./0002-gone.md)\n' }));
+  assert.deepEqual(findings(r, 'link'), []);
+  assert.deepEqual(findings(r, 'decisions'), ['doc-check: FAIL decisions: docs/decisions/index.md -> 0002-gone.md missing']);
+});
+
 test('doc-check: missing state file means explore, budget 100, migrated', () => {
   const files = { 'AGENTS.md': AGENTS_OK + 'filler\n'.repeat(120), 'PRODUCT.md': '# P\n', 'ARCHITECTURE.md': '# A\n' };
   const r = docCheck(makeRepo(files));
@@ -651,7 +739,7 @@ test('init-files: grow keeps a migrated AGENTS.md and lists what the stage adds'
   const again = init(repo, '--stage', 'product');
   assert.ok(again.stdout.split('\n').includes('kept AGENTS.md (exists)'), again.stdout);
   assert.ok(!again.stdout.includes('agents-md:'), again.stdout);
-  assert.deepEqual(repoCheck(repo).lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: .agents/code-map.md']);
+  assert.deepEqual(repoCheck(repo).lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: docs/code-map.md']);
 });
 
 test('init-files: existing check script untouched', () => {
@@ -688,6 +776,49 @@ test('init-files: mise.toml and Makefile get a check task', () => {
   const mr = init(mk, '--stage', 'explore');
   assert.equal(read(mk, 'Makefile'), 'check:\n\tmine\n');
   assert.ok(mr.stdout.split('\n').includes('kept Makefile check (exists)'), mr.stdout);
+  const inline = makeRepo({ 'mise.toml': '[tasks]\ntest = "pytest"\n\n[tools]\nnode = "22"\n' });
+  init(inline, '--stage', 'explore');
+  assert.match(read(inline, 'mise.toml'), /\[tasks\.check\]\nrun = "mise run test && sh \.agents\/doc-check\.sh"\n$/, 'an inline test task counts');
+  const inlineCheck = makeRepo({ 'mise.toml': '[tasks]\ncheck = "make all"\n' });
+  const ic = init(inlineCheck, '--stage', 'explore');
+  assert.equal(read(inlineCheck, 'mise.toml'), '[tasks]\ncheck = "make all"\n');
+  assert.ok(ic.stdout.split('\n').includes('kept mise.toml check (exists)'), ic.stdout);
+  const other = makeRepo({ 'mise.toml': '[tasks]\nbuild = "x"\n\n[env]\ntest = "1"\n' });
+  init(other, '--stage', 'explore');
+  assert.match(read(other, 'mise.toml'), /run = "sh \.agents\/doc-check\.sh"\n$/, 'a test key outside [tasks] is not a task');
+});
+
+test('init-files: a name with $ patterns is written as given', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  init(repo, '--stage', 'explore', '--name', "a$&b$'c$1");
+  assert.match(read(repo, 'AGENTS.md'), /^# Working on a\$&b\$'c\$1\n/);
+});
+
+test('init-files: --stage other than the recorded stage warns', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  init(repo, '--stage', 'explore');
+  const r = init(repo, '--stage', 'product');
+  assert.ok(r.stdout.split('\n').includes('warn --stage product differs from the recorded stage explore; the state keeps explore, so set it with state --set stage=product first'), r.stdout);
+  run(repo, ['state', '--set', 'stage=product']);
+  assert.ok(!init(repo, '--stage', 'product').stdout.includes('differs'));
+});
+
+test('init-files: a recorded design_md is linked, and DESIGN.md is not asked for at the top', () => {
+  const repo = makeRepo({ 'web/App.tsx': 'x', 'web/DESIGN.md': '# D\n' });
+  init(repo, '--stage', 'explore');
+  assert.equal(signals(repo, NO_SESSIONS).design_md_found, 'web/DESIGN.md');
+  run(repo, ['state', '--set', 'design_md=web/DESIGN.md', '--set', 'stage=product']);
+  assert.equal(signals(repo, NO_SESSIONS).design_md_found, null);
+  assert.equal(signals(repo, NO_SESSIONS).files['web/DESIGN.md'], true);
+  assert.equal(signals(repo, NO_SESSIONS).files['DESIGN.md'], undefined);
+  const r = init(repo, '--stage', 'product');
+  assert.ok(r.stdout.split('\n').includes('agents-md: add link to web/DESIGN.md'), r.stdout);
+  assert.ok(!repoCheck(repo).lines.some((l) => l.endsWith('required: DESIGN.md')), 'doc-check reads design_md');
+  assert.ok(!repoCheck(repo).lines.some((l) => l.endsWith('required: web/DESIGN.md')));
+  const bad = run(repo, ['state', '--set', 'design_md=../x/DESIGN.md']);
+  assert.equal(bad.code, 2);
+  assert.equal(run(repo, ['state', '--set', 'design_md=web/notes.md']).code, 2);
+  for (const v of ['web/OLDDESIGN.md', 'xDESIGN.md', '/abs/DESIGN.md', './DESIGN.md', 'web/./DESIGN.md']) assert.equal(run(repo, ['state', '--set', `design_md=${v}`]).code, 2, v);
 });
 
 test('init-files: rust repo without runner gets .agents/check.sh', () => {
@@ -735,15 +866,15 @@ test('init-files: product skeleton fails doc-check only on the provider-owned fi
   assert.ok(!exists(repo, 'docs/threat-model.md'));
   const c = repoCheck(repo);
   assert.equal(c.code, 1, c.stdout);
-  assert.deepEqual(c.lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: .agents/code-map.md']);
+  assert.deepEqual(c.lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: docs/code-map.md']);
   assert.deepEqual(c.lines.filter((l) => / (FAIL|WARN) link:/.test(l)), []);
   const agents = read(repo, 'AGENTS.md');
   assert.ok(agents.includes('](docs/decisions/index.md)') && !agents.includes('0000-template.md'));
-  assert.ok(read(repo, 'ARCHITECTURE.md').includes('`.agents/code-map.md`'));
+  assert.ok(read(repo, 'ARCHITECTURE.md').includes('`docs/code-map.md`'));
   const live = makeRepo({ 'a.txt': 'x' });
   init(live, '--stage', 'live');
   for (const f of ['docs/threat-model.md', 'docs/runbooks/README.md']) assert.ok(exists(live, f), f);
-  assert.deepEqual(repoCheck(live).lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: .agents/code-map.md']);
+  assert.deepEqual(repoCheck(live).lines.filter((l) => l.includes(' FAIL ')), ['doc-check: FAIL required: docs/code-map.md']);
 });
 
 test('init-files: templates are short and free of dashes', () => {
@@ -772,7 +903,7 @@ test('init-files: a UI repo at product gets the screen map, its link and the che
   const agents = read(repo, 'AGENTS.md');
   assert.ok(agents.includes('](docs/ui/screens.md)'), agents);
   assert.ok(agents.includes(`${UI_LINE}\n`), agents);
-  assert.deepEqual(repoCheck(repo).lines.filter((l) => l.includes(' FAIL ')).sort(), ['doc-check: FAIL required: .agents/code-map.md', 'doc-check: FAIL required: DESIGN.md']);
+  assert.deepEqual(repoCheck(repo).lines.filter((l) => l.includes(' FAIL ')).sort(), ['doc-check: FAIL required: DESIGN.md', 'doc-check: FAIL required: docs/code-map.md']);
 });
 
 test('init-files: no screen map or check-screens line without UI, or at explore', () => {
@@ -812,14 +943,38 @@ test('init-files: never writes DESIGN.md or code-map.md', () => {
   const r = init(repo, '--stage', 'scale');
   assert.equal(r.code, 0, r.stderr);
   assert.ok(!exists(repo, 'DESIGN.md'));
-  assert.ok(!exists(repo, '.agents/code-map.md'));
+  assert.ok(!exists(repo, 'docs/code-map.md'));
   assert.equal(readState(repo).has_ui, true);
   const agents = read(repo, 'AGENTS.md');
-  assert.ok(!agents.includes('](DESIGN.md)') && !agents.includes('](.agents/code-map.md)'));
-  const has = makeRepo({ 'DESIGN.md': '# D\n', '.agents/code-map.md': '# M\n' });
+  assert.ok(!agents.includes('](DESIGN.md)') && !agents.includes('code-map.md)'));
+  const has = makeRepo({ 'DESIGN.md': '# D\n', 'docs/code-map.md': '# M\n' });
   init(has, '--stage', 'product');
   const a = read(has, 'AGENTS.md');
-  assert.ok(a.includes('](DESIGN.md)') && a.includes('](.agents/code-map.md)'), 'existing files are linked');
+  assert.ok(a.includes('](DESIGN.md)') && a.includes('](docs/code-map.md)'), 'existing files are linked');
+});
+
+test('code map: the old .agents/code-map.md still counts, with a warning to move it', () => {
+  const repo = makeRepo({ 'a.txt': 'x', '.agents/code-map.md': '# M\n' });
+  const r = init(repo, '--stage', 'product');
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.split('\n').includes('warn .agents/code-map.md is the old place for the code map; move it with git mv .agents/code-map.md docs/code-map.md'), r.stdout);
+  assert.ok(!exists(repo, 'docs/code-map.md'), 'init-files never moves it');
+  assert.ok(read(repo, 'AGENTS.md').includes('[.agents/code-map.md](.agents/code-map.md)'), 'linked where it is');
+  const c = repoCheck(repo);
+  assert.equal(c.code, 0, c.stdout);
+  assert.deepEqual(c.lines.filter((l) => / (FAIL|WARN) /.test(l)), ['doc-check: WARN required: .agents/code-map.md is the old place for the code map; move it with git mv .agents/code-map.md docs/code-map.md']);
+  const sig = signals(repo, NO_SESSIONS);
+  assert.equal(sig.files['docs/code-map.md'], true);
+  assert.equal(sig.code_map_legacy, true);
+  assert.equal(foundry.hookLine(repo), null, 'the hook counts it as present');
+
+  git(repo, 'mv', '.agents/code-map.md', 'docs/code-map.md');
+  writeFileSync(join(repo, 'AGENTS.md'), read(repo, 'AGENTS.md').replaceAll('.agents/code-map.md', 'docs/code-map.md'));
+  const moved = signals(repo, NO_SESSIONS);
+  assert.equal(moved.code_map_legacy, false);
+  assert.equal(moved.files['docs/code-map.md'], true);
+  assert.ok(!init(repo, '--stage', 'product').stdout.includes('old place'));
+  assert.deepEqual(repoCheck(repo).lines.filter((l) => / (FAIL|WARN) /.test(l)), []);
 });
 
 test('init-files: --skip GLOSSARY.md leaves it out', () => {
@@ -979,14 +1134,18 @@ const COMMAND_REFS = ['routing.md', 'init.md', 'audit.md', 'grow.md', 'providers
 
 test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.md names a real command', () => {
   assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook']);
-  let mentions = 0;
+  const named = new Set();
+  const files = new Set();
   for (const f of readdirSync(REFS).filter((n) => n.endsWith('.md'))) {
     for (const m of ref(f).matchAll(/node <skill dir>\/scripts\/foundry\.mjs(?: +([^\s`]+))?/g)) {
-      mentions++;
       assert.ok(foundry.COMMANDS.includes(m[1]), `${f}: unknown command ${m[1]}`);
+      named.add(m[1]);
+      files.add(f);
     }
   }
-  assert.ok(mentions >= COMMAND_REFS.length, `mentions: ${mentions}`);
+  for (const f of COMMAND_REFS) assert.ok(files.has(f), `${f} names a foundry command`);
+  // hook runs from the installed git hook, never from a reference step.
+  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook')) assert.ok(named.has(c), `some reference runs ${c}`);
 });
 
 test('refs: every relative link in reference/*.md resolves', () => {
@@ -1041,6 +1200,12 @@ test('refs: no prose dashes', () => {
     const prose = ref(f).replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
     prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `${f}:${i + 1}`));
   }
+});
+
+test('readme: no prose dashes', () => {
+  const readme = join(dirname(FOUNDRY), '..', '..', '..', 'README.md');
+  const prose = readFileSync(readme, 'utf8').replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `README.md:${i + 1}`));
 });
 
 test('doc-check: required list matches REQUIRED', () => {
@@ -1124,6 +1289,35 @@ test('digest: matches by cwd and repository, skips others', () => {
   assert.deepEqual(digest(repo, NO_SESSIONS), []);
 });
 
+test('digest: the newest sessions win the limit; names are capped; a quoted type name is kept', () => {
+  const repo = makeRepo();
+  const start = (t) => ({ type: 'session.start', data: { sessionId: 'x', startTime: t, context: {} }, id: 'e1', timestamp: t, parentId: null });
+  const tool = (name, args = {}) => ({ type: 'tool.execution_start', data: { toolName: name, arguments: args }, id: 'e3', timestamp: 't', parentId: 'e1' });
+  const msg = (text) => ({ type: 'user.message', data: { content: text }, id: 'e2', timestamp: 't', parentId: 'e1' });
+  const root = copilotRoot([
+    { id: 'old', workspace: [`cwd: ${repo}`], events: [start('2026-01-01T00:00:00.000Z'), '{not json'] },
+    { id: 'new', workspace: [`cwd: ${repo}`], events: [start('2026-02-01T00:00:00.000Z'), tool('x'.repeat(500)), tool('skill', { skill: 'y'.repeat(500) }), msg('why did "tool.execution_complete" show up?')] },
+  ]);
+  writeFileSync(join(root, 'old', 'events.jsonl'), JSON.stringify(start('2026-01-01T00:00:00.000Z')) + '\n');
+  const one = digest(repo, { sessionsRoot: root, limit: 1 });
+  assert.deepEqual(one.map((d) => d.id), ['new']);
+  assert.equal(one[0].tools[0].length, 80);
+  assert.equal(one[0].skills[0], 'y'.repeat(80));
+  assert.deepEqual(one[0].user, ['why did "tool.execution_complete" show up?']);
+});
+
+test('digest: a transcript line longer than a read chunk is read whole', () => {
+  const repo = makeRepo();
+  const long = 'z'.repeat((1 << 20) * 2 + 17);
+  const root = copilotRoot([{ id: 's', workspace: [`cwd: ${repo}`], events: [
+    { type: 'session.start', data: { startTime: '2026-01-01T00:00:00.000Z' } },
+    { type: 'user.message', data: { content: long } },
+    { type: 'user.message', data: { content: 'after' } },
+  ] }]);
+  const [d] = digest(repo, { sessionsRoot: root });
+  assert.deepEqual(d.user, ['z'.repeat(500), 'after']);
+});
+
 test('digest CLI: summary lines, --json, --limit and bad arguments', () => {
   const repo = makeRepo();
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-home-')));
@@ -1175,8 +1369,10 @@ test('garden-range: null last means last 50; --mark records HEAD', () => {
 test('garden-range: fewer than 50 commits starts at the root; errors', () => {
   const repo = withState();
   commitN(repo, 3);
-  const root = git(repo, 'rev-list', '--max-parents=0', 'HEAD');
-  assert.deepEqual(gardenRange(repo), { from: root, to: git(repo, 'rev-parse', 'HEAD'), commits: 3 });
+  const empty = git(repo, 'hash-object', '-t', 'tree', '/dev/null');
+  const all = Number(git(repo, 'rev-list', '--count', 'HEAD'));
+  assert.deepEqual(gardenRange(repo), { from: empty, to: git(repo, 'rev-parse', 'HEAD'), commits: all });
+  assert.equal(git(repo, 'log', '--format=%s', `${empty}..HEAD`).split('\n').length, all, 'the root commit is in the range');
   const noState = makeRepo();
   assert.equal(run(noState, ['garden-range']).code, 0, 'reading works without a state file');
   const mark = run(noState, ['garden-range', '--mark']);
@@ -1194,7 +1390,7 @@ test('garden-range: fewer than 50 commits starts at the root; errors', () => {
 const HOOK_LINE = /^foundry: \d+ missing for product \(.+\), \d+ interview\(s\) queued; run foundry to see them\.\n$/;
 const ROOT = join(dirname(FOUNDRY), '..', '..', '..');
 const SKILL = join(dirname(FOUNDRY), '..', 'SKILL.md');
-const PRODUCT_DOCS = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'CONSTRAINTS.md'];
+const PRODUCT_DOCS = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'CONSTRAINTS.md'];
 const hookRepo = (state, files = []) => makeRepo({
   '.agents/foundry.json': JSON.stringify({ ...STATE, ...state }, null, 2) + '\n',
   ...Object.fromEntries(files.map((f) => [f, 'x\n'])),
@@ -1245,6 +1441,18 @@ test('hook: live counts docs/runbooks/ only as a directory', () => {
   assert.equal(run(repo, ['hook']).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
 });
 
+test('hook: from a subfolder and from a linked worktree it finds the repo top without git', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  mkdirSync(join(repo, 'src', 'deep'), { recursive: true });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  assert.equal(r.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
+  const wt = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-wt-'))) + '/w';
+  git(repo, 'worktree', 'add', '-q', wt);
+  assert.equal(foundry.nearestTop(join(wt)), wt);
+  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  assert.equal(w.stdout, r.stdout);
+});
+
 test('hook: any error exits 0 and prints nothing', () => {
   const corrupt = makeRepo({ '.agents/foundry.json': '{ not json' });
   for (const state of [null, { stage: 'nope' }, { stage: 'product', queue: 'x' }]) {
@@ -1278,10 +1486,11 @@ test('skill: description ≤ 300 chars and names start/audit/ready', () => {
   const fm = frontmatter(readFileSync(SKILL, 'utf8'));
   assert.equal(fm.name, 'foundry');
   assert.equal(fm.license, 'MIT');
-  assert.equal(fm['metadata.version'], '1.0.0');
+  assert.equal(fm['metadata.version'], '1.1.0');
   assert.ok(fm.description.length <= 300, `description has ${fm.description.length} chars`);
   for (const re of [/project/, /audit/, /ready/]) assert.match(fm.description, re);
   assert.match(fm.description, /feature|bug/, 'says what skips it');
+  assert.match(fm.description, /skips it/, 'says it is skipped');
 });
 
 test('skill: SKILL.md under 80 lines, every link resolves', () => {

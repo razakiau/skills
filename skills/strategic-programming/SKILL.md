@@ -3,7 +3,7 @@ name: strategic-programming
 description: Use when fixing a bug, adding a feature or refactoring code, or when the strategic-programming audit blocks your turn. Before writing, a placement note names the owning layer, the precedent and the call sites, and states tactical or strategic. After, a bundled audit script measures the diff and each flag gets an answer. Doc- and config-only changes skip it.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Strategic programming
@@ -34,7 +34,7 @@ Run `node <skill dir>/scripts/sp.mjs start` before your first edit of this chang
 
 ### 2. Read the code map
 
-Read `.agents/code-map.md` at the repo top: concept rows (concept, home, path, precedent) and the **Invariants**, rules no graph shows. A row's precedent can be stale: open its file and find the symbol before you copy it. When it is missing, say so in the note, use the nearest real code as the precedent, and propose the row fix. With no map, a Full change drafts one with [reference/code-map.md](reference/code-map.md) and the owner reviews it before it is saved. Done: you know which row, if any, covers the concept, its precedent exists or you said it does not, and you know every invariant that applies.
+Read `docs/code-map.md` at the repo top (`.agents/code-map.md` in a repo that has not moved it yet): concept rows (concept, home, path, precedent) and the **Invariants**, rules no graph shows. A row's precedent can be stale: open its file and find the symbol before you copy it. When it is missing, say so in the note, use the nearest real code as the precedent, and propose the row fix. With no map, a Full change drafts one with [reference/code-map.md](reference/code-map.md) and the owner reviews it before it is saved. Done: you know which row, if any, covers the concept, its precedent exists or you said it does not, and you know every invariant that applies.
 
 ### 3. Write the placement note
 
@@ -108,4 +108,4 @@ A branch that holds several changes, or work from before this skill was loaded, 
 
 ## The end-of-turn hook
 
-The hook runs only in repos with `.agents/code-map.md` at the top, the editor's folder or a linked worktree of it (`git worktree add`); elsewhere step 6 is the only audit. It speaks after a turn in which you changed non-test code: at the end of the turn, or when you call `ask_user` mid-turn. It blocks at most once per distinct diff. The block starts `strategic-programming audit (see the strategic-programming skill):`, then a `repo:` line when the code is in a worktree, then the `audit` lines (at most 40 file lines, no duplicates line). Answer every flag as in step 6, then finish, or call `ask_user` again. The owner's edits between turns, and while you wait on `ask_user`, pass silently; without a turn record (no session id) it judges the editor's repo on its whole diff since the base.
+The hook runs only in repos with a code map at the top (`docs/code-map.md`, or the older `.agents/code-map.md`), the editor's folder or a linked worktree of it (`git worktree add`); elsewhere step 6 is the only audit. It speaks after a turn in which you changed non-test code: at the end of the turn, or when you call `ask_user` mid-turn. It blocks at most once per distinct diff. The block starts `strategic-programming audit (see the strategic-programming skill):`, then a `repo:` line when the code is in a worktree, then the `audit` lines (at most 40 file lines, no duplicates line). Answer every flag as in step 6, then finish, or call `ask_user` again. The owner's edits between turns, and while you wait on `ask_user`, pass silently; without a turn record (no session id) it judges the editor's repo on its whole diff since the base.

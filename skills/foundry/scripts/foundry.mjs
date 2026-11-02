@@ -38,11 +38,23 @@ export function writeState(top, state) {
 
 // Required files per stage, cumulative. The UI_ONLY files apply only when the repo has UI.
 const EXPLORE_FILES = ['AGENTS.md'];
-const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
+const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
 const LIVE_FILES = [...PRODUCT_FILES, 'docs/threat-model.md', 'docs/runbooks/'];
 export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: LIVE_FILES, scale: LIVE_FILES };
 export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
 export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi || !UI_ONLY.includes(f));
+
+// A repo may keep DESIGN.md below the top (web/DESIGN.md); the state records where as design_md.
+const designPath = (state) => (typeof state?.design_md === 'string' && state.design_md ? state.design_md : 'DESIGN.md');
+const asRecorded = (state) => (f) => (f === 'DESIGN.md' ? designPath(state) : f);
+
+// The code map moved out of the hidden folder, where ripgrep does not look. The old place still counts
+// until grow moves it.
+export const CODE_MAP = 'docs/code-map.md';
+export const LEGACY_CODE_MAP = '.agents/code-map.md';
+const legacyCodeMap = (has) => !has(CODE_MAP) && has(LEGACY_CODE_MAP);
+const satisfied = (has) => (f) => has(f) || (f === CODE_MAP && has(LEGACY_CODE_MAP));
+const MOVE_CODE_MAP = `${LEGACY_CODE_MAP} is the old place for the code map; move it with git mv ${LEGACY_CODE_MAP} ${CODE_MAP}`;
 
 const COPILOT_SESSIONS = () => join(homedir(), '.copilot', 'session-state');
 
@@ -57,7 +69,7 @@ const UI_FILE = /\.(tsx|jsx|vue|svelte|html)$/;
 const UI_DIRS = ['web/', 'apps/web/', 'frontend/'];
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?|e2e|fixtures?)\/|\.(test|spec)\.[^/]+$/;
 const AUTH_PATH = /(auth|session|login|tenant|rbac|permission)/i;
-const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/;
+const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/i;
 const COMPOSE_FILE = /^(docker-)?compose\.y[a-z]*ml$/;
 const NAMES_USERS = /\busers?\b/i;
 
@@ -69,21 +81,74 @@ function gitOut(top, args) {
   }
 }
 
-const skipped = (path) => path.split('/').some((part) => part === 'node_modules' || part === '.git');
-
-// Repo-relative file paths, sorted: git's view (tracked and untracked, not ignored) in a work tree, else a walk.
-function listFiles(top) {
-  const out = gitOut(top, ['ls-files', '--cached', '--others', '--exclude-standard']);
-  const files = out !== null
-    ? out.split('\n').filter(Boolean)
-    : readdirSync(top, { recursive: true, withFileTypes: true })
-      .filter((d) => d.isFile())
-      .map((d) => join(d.parentPath, d.name).slice(top.length + 1));
-  return files.filter((f) => !skipped(f)).sort();
-}
-
 const readText = (path) => { try { return readFileSync(path, 'utf8'); } catch { return ''; } };
 const real = (path) => { try { return realpathSync(path); } catch { return path; } };
+
+const SKIP_DIRS = new Set(['node_modules', '.git']);
+const skipped = (path) => path.split('/').some((part) => SKIP_DIRS.has(part));
+
+// Every file under dir, repo-relative; never descends into node_modules or .git.
+function walk(top, dir = top, out = []) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const d of entries) {
+    if (SKIP_DIRS.has(d.name)) continue;
+    const path = join(dir, d.name);
+    if (d.isDirectory()) walk(top, path, out);
+    else if (d.isFile()) out.push(path.slice(top.length + 1));
+  }
+  return out;
+}
+
+// Is top the work tree's own top? A folder without git of its own inside another repo is not.
+const ownRepo = (top) => {
+  const t = gitOut(top, ['rev-parse', '--show-toplevel']);
+  return t !== null && real(t) === real(top);
+};
+
+// Where signals reads the repo from: the work tree, or the tree of one commit (--as-of).
+function worktreeSource(top) {
+  const git = ownRepo(top);
+  const out = git ? gitOut(top, ['ls-files', '--cached', '--others', '--exclude-standard']) : null;
+  const files = (out !== null ? out.split('\n').filter(Boolean) : walk(top)).filter((f) => !skipped(f)).sort();
+  return { git, rev: 'HEAD', files, read: (f) => readText(join(top, f)), has: (f) => present(top, f) };
+}
+
+function commitSource(top, rev) {
+  const out = gitOut(top, ['ls-tree', '-r', '--name-only', '-z', rev]);
+  if (out === null) throw new FoundryError(`--as-of ${rev} is not a commit in this repo`, 2);
+  const files = out.split('\0').filter(Boolean).filter((f) => !skipped(f)).sort();
+  const set = new Set(files);
+  const has = (f) => (f.endsWith('/') ? files.some((x) => x.startsWith(f)) : set.has(f));
+  const read = (f) => (set.has(f) ? gitOut(top, ['show', `${rev}:${f}`]) ?? '' : '');
+  return { git: true, rev, files, read, has };
+}
+
+// The first commit at or before an ISO date or a commit-ish.
+function resolveAsOf(top, asOf) {
+  if (/^\d{4}-\d{2}-\d{2}/.test(asOf)) {
+    // A bare date means the end of that day, local time, as git reads --before.
+    const when = asOf.length === 10 ? `${asOf}T23:59:59` : asOf;
+    const date = Date.parse(when);
+    if (Number.isNaN(date)) throw new FoundryError(`--as-of ${asOf} is not a date`, 2);
+    const sha = gitOut(top, ['rev-list', '-1', `--before=${when}`, 'HEAD']);
+    if (!sha) throw new FoundryError(`--as-of ${asOf}: no commit on or before that date`, 2);
+    return { sha, date };
+  }
+  const sha = gitOut(top, ['rev-parse', '--verify', '-q', `${asOf}^{commit}`]);
+  if (!sha) throw new FoundryError(`--as-of ${asOf} is not a commit in this repo`, 2);
+  return { sha, date: Date.parse(gitOut(top, ['show', '-s', '--format=%cI', sha])) };
+}
+
+// Commits on the upstream (or origin's default branch) that HEAD lacks, from the last fetch; null when unknown.
+function behindUpstream(top) {
+  const up = gitOut(top, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
+    ?? gitOut(top, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD']);
+  if (!up) return null;
+  const n = Number(gitOut(top, ['rev-list', '--count', `HEAD..${up}`]));
+  return Number.isFinite(n) ? { ref: up, commits: n } : null;
+}
+
 const within = (path, top) => path === top || path.startsWith(top + '/');
 
 // `owner/repo` from the origin URL (https or scp-style), or null.
@@ -115,16 +180,17 @@ function matchingSessions(top, root) {
   return ids;
 }
 
-function deployEvidence(top, files) {
+function deployEvidence(src) {
+  const { files, read } = src;
   const found = [];
   for (const f of files) {
-    if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(readText(join(top, f)))) found.push(f);
+    if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(read(f))) found.push(f);
   }
   for (const f of files) {
-    if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(readText(join(top, f)))) found.push(f);
+    if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(read(f))) found.push(f);
   }
   if (files.includes('Dockerfile')) found.push('Dockerfile');
-  for (const url of readText(join(top, 'README.md')).match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
+  for (const url of read('README.md').match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
     let host = '';
     try { host = new URL(url).hostname; } catch { continue; }
     if (host !== 'github.com' && !host.endsWith('.github.com')) { found.push(`README.md: ${url}`); break; }
@@ -139,23 +205,27 @@ function present(top, file) {
 }
 
 // What the repo shows about its stage, and the stage to propose. The owner decides.
+// opts.asOf (an ISO date or a commit) reads the repo as it was then; sessions are then left out.
 export function signals(top, opts = {}) {
   const sessionsRoot = opts.sessionsRoot ?? COPILOT_SESSIONS();
-  const recorded = readState(top);
-  const files = listFiles(top);
+  const asOf = opts.asOf ? resolveAsOf(top, opts.asOf) : null;
+  const src = asOf ? commitSource(top, asOf.sha) : worktreeSource(top);
+  const recorded = asOf ? null : readState(top);
+  const { files } = src;
+  const now = asOf ? asOf.date : Date.now();
 
-  const commits = Number(gitOut(top, ['rev-list', '--count', 'HEAD']) ?? 0) || 0;
-  const roots = commits ? (gitOut(top, ['log', '--max-parents=0', '--format=%cI', 'HEAD']) ?? '').split('\n').filter(Boolean).sort() : [];
+  const commits = src.git ? Number(gitOut(top, ['rev-list', '--count', src.rev]) ?? 0) || 0 : 0;
+  const roots = commits ? (gitOut(top, ['log', '--max-parents=0', '--format=%cI', src.rev]) ?? '').split('\n').filter(Boolean).sort() : [];
   const first_commit = roots[0] ?? null;
-  const age_days = first_commit ? Math.max(0, Math.floor((Date.now() - Date.parse(first_commit)) / DAY_MS)) : 0;
+  const age_days = first_commit ? Math.max(0, Math.floor((now - Date.parse(first_commit)) / DAY_MS)) : 0;
 
   const has_ui = files.some((f) => UI_FILE.test(f) && !TEST_PATH.test(f))
-    || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || present(top, d));
-  const deployed = deployEvidence(top, files);
+    || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || src.has(d));
+  const deployed = deployEvidence(src);
   const auth_code = files.filter((f) => AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
-  const sessions = matchingSessions(top, sessionsRoot)?.length ?? null;
-  const hasProduct = present(top, 'PRODUCT.md');
-  const namesUsers = NAMES_USERS.test(readText(join(top, 'README.md')));
+  const sessions = asOf ? null : matchingSessions(top, sessionsRoot)?.length ?? null;
+  const hasProduct = src.has('PRODUCT.md');
+  const namesUsers = NAMES_USERS.test(src.read('README.md'));
 
   const productReasons = [
     commits >= PRODUCT_COMMITS && `${commits} commits`,
@@ -182,17 +252,38 @@ export function signals(top, opts = {}) {
   }
   if (!reasons.length) reasons.push('no signal beyond explore');
 
-  const required = requiredFor(proposed, has_ui);
-  const fileMap = Object.fromEntries(required.map((f) => [f, present(top, f)]));
+  const required = requiredFor(proposed, has_ui).map(asRecorded(recorded));
+  const fileMap = Object.fromEntries(required.map((f) => [f, satisfied(src.has)(f)]));
+  const code_map_legacy = legacyCodeMap(src.has);
+  const behind = asOf || !src.git ? null : behindUpstream(top);
+  // An unrecorded DESIGN.md one folder down, for the owner to record with state --set design_md=<path>.
+  const design_md_found = has_ui && !recorded?.design_md && !src.has('DESIGN.md')
+    ? files.find((f) => /^[^/]+\/DESIGN\.md$/.test(f)) ?? null
+    : null;
 
-  return { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
+  if (asOf) out.as_of = asOf.sha;
+  return out;
 }
 
+// A checkout this far behind its upstream may be missing the docs it is asked about.
+const BEHIND_WARN = 10;
+
 function signalsCmd(args) {
-  for (const a of args) if (a !== '--json') throw new FoundryError(`unknown argument ${a}`, 2);
-  const s = signals(repoTop());
-  if (args.includes('--json')) process.stdout.write(JSON.stringify(s, null, 2) + '\n');
-  else process.stdout.write(`proposed stage: ${s.proposed}\n${s.reasons.map((r) => `- ${r}\n`).join('')}`);
+  let asOf = null;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--json') json = true;
+    else if (args[i] === '--as-of') {
+      asOf = args[++i];
+      if (!asOf) throw new FoundryError('--as-of needs a date or a commit', 2);
+    } else throw new FoundryError(`unknown argument ${args[i]}`, 2);
+  }
+  const s = signals(repoTop(), { asOf });
+  if (json) { process.stdout.write(JSON.stringify(s, null, 2) + '\n'); return; }
+  const head = s.as_of ? `proposed stage as of ${s.as_of.slice(0, 7)}: ${s.proposed}` : `proposed stage: ${s.proposed}`;
+  const warn = s.behind && s.behind.commits >= BEHIND_WARN ? `warn: ${s.behind.commits} commits behind ${s.behind.ref}; pull before trusting the files list\n` : '';
+  process.stdout.write(`${head}\n${s.reasons.map((r) => `- ${r}\n`).join('')}${warn}`);
 }
 
 function today() {
@@ -220,6 +311,10 @@ const SETTERS = {
   has_ui: (s, v) => {
     if (v !== 'true' && v !== 'false') throw new FoundryError('has_ui must be true or false', 2);
     s.has_ui = v === 'true';
+  },
+  design_md: (s, v) => {
+    if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').some((p) => p === '.' || p === '..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
+    s.design_md = v;
   },
 };
 
@@ -261,7 +356,7 @@ const CHECK_SH = '.agents/check.sh';
 const SECURITY_LINE = 'The reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed.';
 const UI_LINE = 'After any UI change, run check-screens before reporting done.';
 
-// Files init-files writes per stage, as [repo path, template]. DESIGN.md and .agents/code-map.md belong to providers.
+// Files init-files writes per stage, as [repo path, template]. DESIGN.md and docs/code-map.md belong to providers.
 const PRODUCT_TEMPLATES = [
   ['PRODUCT.md', 'PRODUCT.md'], ['ARCHITECTURE.md', 'ARCHITECTURE.md'], ['GLOSSARY.md', 'GLOSSARY.md'],
   ['docs/decisions/index.md', 'decisions-index.md'], ['docs/decisions/0000-template.md', 'decision.md'],
@@ -277,7 +372,7 @@ const LINKS = [
   ['README.md', 'what this is and how to run it'],
   ['PRODUCT.md', 'who it is for and what it must do'],
   ['ARCHITECTURE.md', 'how the code is laid out'],
-  ['.agents/code-map.md', 'the module by module map'],
+  [CODE_MAP, 'the module by module map'],
   ['GLOSSARY.md', 'the words this project uses'],
   ['DESIGN.md', 'the visual design system'],
   ['docs/ui/screens.md', 'every screen, its approved mockup and its last check'],
@@ -324,8 +419,11 @@ function planCheck(top) {
   if (existsSync(misePath)) {
     const text = readFileSync(misePath, 'utf8');
     const command = 'mise run check';
-    if (/^\[tasks\.check\]/m.test(text)) return { file: 'mise.toml', text: null, command };
-    const run = /^\[tasks\.test\]/m.test(text) ? `mise run test && sh ${DOC_CHECK}` : `sh ${DOC_CHECK}`;
+    // A task is a [tasks.x] table, or an x = ... key inside [tasks].
+    const tasksBody = text.match(/^\[tasks\][ \t]*\n([\s\S]*?)(?=^\[|(?![\s\S]))/m)?.[1] ?? '';
+    const hasTask = (t) => new RegExp(`^\\[tasks\\.${t}\\]`, 'm').test(text) || new RegExp(`^[ \\t]*"?${t}"?[ \\t]*=`, 'm').test(tasksBody);
+    if (hasTask('check')) return { file: 'mise.toml', text: null, command };
+    const run = hasTask('test') ? `mise run test && sh ${DOC_CHECK}` : `sh ${DOC_CHECK}`;
     return { file: 'mise.toml', text: `${text.replace(/\n*$/, '\n')}\n[tasks.check]\nrun = "${run}"\n`, command };
   }
   const makePath = join(top, 'Makefile');
@@ -341,26 +439,26 @@ function planCheck(top) {
 }
 
 // The `## Where things are` entries for the files that will exist.
-const linkedFiles = (willExist) => LINKS.filter(([f]) => willExist(f));
+const linkedFiles = (willExist, rename = (f) => f) => LINKS.map(([f, what]) => [rename(f), what]).filter(([f]) => willExist(f));
 const hasSecurityLine = (stage) => stage !== 'explore';
 
 const hasUiLine = (stage, hasUi) => hasUi && stage !== 'explore';
 
-function agentsMd(stage, name, check, willExist, hasUi) {
-  const links = linkedFiles(willExist).map(([f, what]) => `- [${f}](${f}): ${what}.`);
+function agentsMd(stage, name, check, willExist, hasUi, rename) {
+  const links = linkedFiles(willExist, rename).map(([f, what]) => `- [${f}](${f}): ${what}.`);
   let text = template('AGENTS.md')
-    .replace('{{name}}', name)
-    .replace('{{check}}', check)
-    .replace('{{links}}', links.length ? links.join('\n') : 'Nothing yet beyond this file.');
+    .replace('{{name}}', () => name)
+    .replace('{{check}}', () => check)
+    .replace('{{links}}', () => (links.length ? links.join('\n') : 'Nothing yet beyond this file.'));
   if (!hasSecurityLine(stage)) text = text.replace(`${SECURITY_LINE}\n`, '');
   if (!hasUiLine(stage, hasUi)) text = text.replace(`${UI_LINE}\n`, '');
   return text;
 }
 
 // What a kept AGENTS.md lacks against the one agentsMd would write at this stage, as `agents-md:` lines.
-function agentsMdGaps(text, stage, willExist, hasUi) {
+function agentsMdGaps(text, stage, willExist, hasUi, rename) {
   const linked = (f) => text.includes(`](${f})`) || text.includes(`](./${f})`) || text.includes(`](${f}#`);
-  const gaps = linkedFiles(willExist).filter(([f]) => !linked(f)).map(([f]) => `agents-md: add link to ${f}`);
+  const gaps = linkedFiles(willExist, rename).filter(([f]) => !linked(f)).map(([f]) => `agents-md: add link to ${f}`);
   if (hasSecurityLine(stage) && !text.includes(SECURITY_LINE)) gaps.push(`agents-md: add line: ${SECURITY_LINE}`);
   if (hasUiLine(stage, hasUi) && !text.includes(UI_LINE)) gaps.push(`agents-md: add line: ${UI_LINE}`);
   return gaps;
@@ -373,7 +471,9 @@ function ignoredWarnings(top, paths) {
   const r = spawnSync('git', ['check-ignore', '-v', '-z', '--stdin'], {
     cwd: top, input: paths.join('\0') + '\0', encoding: 'utf8',
   });
-  if (r.status !== 0 || !r.stdout) return [];
+  // 1 means nothing is ignored; anything else is git failing, which must not read as "nothing ignored".
+  if (r.status === 1 || (r.status === 0 && !r.stdout)) return [];
+  if (r.status !== 0) return [`warn could not check ignore rules: ${(r.stderr || `git exited ${r.status}`).trim().split('\n')[0]}`];
   const f = r.stdout.split('\0');
   const out = [];
   for (let i = 0; i + 3 < f.length; i += 4) {
@@ -397,16 +497,21 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f));
   const written = new Set(docs.filter(([f]) => !exists(f)).map(([f]) => f));
   const willExist = (f) => !skip.includes(f) && (written.has(f) || exists(f));
+  const legacyMap = legacyCodeMap(exists);
+  // AGENTS.md links the code map where it is today; grow moves it and the link together.
+  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : asRecorded(current)(f));
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
+  if (legacyMap) lines.push(`warn ${MOVE_CODE_MAP}`);
+  if (current && current.stage !== stage) lines.push(`warn --stage ${stage} differs from the recorded stage ${current.stage}; the state keeps ${current.stage}, so set it with state --set stage=${stage} first`);
   reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
-    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi));
+    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, rename));
   } else if (agentsExisted) lines.push('kept AGENTS.md (exists, unmigrated)');
   else {
-    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi)]);
+    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi, rename)]);
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
@@ -474,10 +579,17 @@ function vendorCheckCmd(args) {
 
 const DIGEST_LIMIT = 30;
 const USER_CHARS = 500;
+// Tool and skill names come from the transcript; a pathological one must not blow up the digest.
+const NAME_CHARS = 80;
+const NAMES_PER_SESSION = 200;
+// How far into events.jsonl to look for session.start when only sorting.
+const START_SCAN_LINES = 20;
 const CHUNK = 1 << 20;
 const NEWLINE = 0x0a;
 // Tool output can hold secrets. Its lines are dropped on these bytes, before any decoding or parsing.
-const TOOL_OUTPUT = Buffer.from('"tool.execution_complete"');
+// The bytes are the event's own type field, so a user message that quotes the type name is kept.
+const TOOL_OUTPUT = [Buffer.from('{"type":"tool.execution_complete"'), Buffer.from('"type":"tool.execution_complete","data"')];
+const isToolOutput = (raw) => TOOL_OUTPUT.some((b) => raw.includes(b));
 
 // Each line of a file, as a Buffer, read in chunks so a large transcript never sits in memory whole.
 function* lines(path) {
@@ -485,13 +597,18 @@ function* lines(path) {
   try { fd = openSync(path, 'r'); } catch { return; }
   try {
     const buf = Buffer.alloc(CHUNK);
-    let rest = Buffer.alloc(0);
+    // A line longer than a chunk is kept as a list of pieces and joined once, so no byte is copied twice.
+    let parts = [];
     for (let n; (n = readSync(fd, buf, 0, CHUNK, null)) > 0;) {
-      let chunk = Buffer.concat([rest, buf.subarray(0, n)]);
-      for (let nl; (nl = chunk.indexOf(NEWLINE)) !== -1; chunk = chunk.subarray(nl + 1)) yield chunk.subarray(0, nl);
-      rest = Buffer.from(chunk);
+      let chunk = buf.subarray(0, n);
+      for (let nl; (nl = chunk.indexOf(NEWLINE)) !== -1; chunk = chunk.subarray(nl + 1)) {
+        const head = chunk.subarray(0, nl);
+        yield parts.length ? Buffer.concat([...parts, head]) : Buffer.from(head);
+        parts = [];
+      }
+      if (chunk.length) parts.push(Buffer.from(chunk));
     }
-    if (rest.length) yield rest;
+    if (parts.length) yield Buffer.concat(parts);
   } finally {
     closeSync(fd);
   }
@@ -507,8 +624,9 @@ function digestSession(dir, id) {
   const tools = new Set();
   const skills = new Set();
   let compactions = 0;
+  const cap = (v) => Array.from(v).slice(0, NAME_CHARS).join('');
   for (const raw of lines(join(dir, 'events.jsonl'))) {
-    if (raw.includes(TOOL_OUTPUT)) continue;
+    if (isToolOutput(raw)) continue;
     let e;
     try { e = JSON.parse(raw.toString('utf8')); } catch { continue; }
     if (!isObject(e) || !isObject(e.data)) continue;
@@ -521,8 +639,8 @@ function digestSession(dir, id) {
       const name = e.data.toolName;
       if (typeof name !== 'string') continue;
       const args = isObject(e.data.arguments) ? e.data.arguments : {};
-      tools.add(`${name}(${Object.keys(args).join(',')})`);
-      if (name === 'skill' && typeof args.skill === 'string') skills.add(args.skill);
+      if (tools.size < NAMES_PER_SESSION) tools.add(cap(`${name}(${Object.keys(args).join(',')})`));
+      if (name === 'skill' && typeof args.skill === 'string' && skills.size < NAMES_PER_SESSION) skills.add(cap(args.skill));
     } else if (e.type === 'session.compaction_start') {
       compactions++;
     }
@@ -531,13 +649,27 @@ function digestSession(dir, id) {
   return { id, started, user, tools: [...tools], skills: [...skills], compactions };
 }
 
-// The Copilot sessions of this repo, newest first by start time.
+// A session's start time from the first lines of its transcript, else workspace.yaml; never the whole file.
+function sessionStart(dir) {
+  let n = 0;
+  for (const raw of lines(join(dir, 'events.jsonl'))) {
+    if (++n > START_SCAN_LINES) break;
+    if (isToolOutput(raw)) continue;
+    let e;
+    try { e = JSON.parse(raw.toString('utf8')); } catch { continue; }
+    if (e?.type === 'session.start' && typeof e.data?.startTime === 'string') return e.data.startTime;
+  }
+  return yamlValue(readText(join(dir, 'workspace.yaml')), 'created_at');
+}
+
+// The Copilot sessions of this repo, newest first by start time. Only the newest `limit` are read in full.
 export function digest(top, { sessionsRoot = COPILOT_SESSIONS(), limit = DIGEST_LIMIT } = {}) {
   const ids = matchingSessions(top, sessionsRoot) ?? [];
-  const all = ids.map((id) => digestSession(join(sessionsRoot, id), id));
-  const time = (d) => Date.parse(d.started ?? '') || 0;
-  all.sort((a, b) => time(b) - time(a) || a.id.localeCompare(b.id));
-  return all.slice(0, limit);
+  const time = (t) => Date.parse(t ?? '') || 0;
+  const newest = ids.map((id) => ({ id, started: sessionStart(join(sessionsRoot, id)) }))
+    .sort((a, b) => time(b.started) - time(a.started) || a.id.localeCompare(b.id))
+    .slice(0, limit);
+  return newest.map(({ id }) => digestSession(join(sessionsRoot, id), id));
 }
 
 function digestCmd(args) {
@@ -559,6 +691,7 @@ function digestCmd(args) {
 // ---- garden-range ----
 
 const GARDEN_DEFAULT = 50;
+const EMPTY_TREE = (top) => gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
 
 // The commits since the last garden pass, or the last 50 (from the root when there are fewer), as git's from..to.
 export function gardenRange(top) {
@@ -566,6 +699,7 @@ export function gardenRange(top) {
   if (!to) throw new FoundryError('no commits yet', 1);
   const last = readState(top)?.garden_last ?? null;
   let from;
+  let empty = false;
   if (last !== null) {
     const known = gitOut(top, ['rev-parse', '--verify', '-q', `${last}^{commit}`]);
     if (!known || gitOut(top, ['merge-base', '--is-ancestor', known, to]) === null) {
@@ -573,10 +707,13 @@ export function gardenRange(top) {
     }
     from = known;
   } else {
-    from = gitOut(top, ['rev-parse', '--verify', '-q', `HEAD~${GARDEN_DEFAULT}^{commit}`])
-      ?? gitOut(top, ['rev-list', '--max-parents=0', 'HEAD']).split('\n')[0];
+    // With fewer than 50 commits, start before the root: the empty tree, so the root commit is in the range.
+    from = gitOut(top, ['rev-parse', '--verify', '-q', `HEAD~${GARDEN_DEFAULT}^{commit}`]);
+    if (from === null) { from = EMPTY_TREE(top); empty = true; }
   }
-  const commits = Number(gitOut(top, ['rev-list', '--count', `${from}..${to}`])) || 0;
+  const commits = empty
+    ? Number(gitOut(top, ['rev-list', '--count', to])) || 0
+    : Number(gitOut(top, ['rev-list', '--count', `${from}..${to}`])) || 0;
   return { from, to, commits };
 }
 
@@ -607,17 +744,25 @@ export function hookLine(top) {
   if (!Object.hasOwn(REQUIRED, s.stage)) throw new FoundryError(`unknown stage ${s.stage}`, 1);
   const queue = s.queue ?? [];
   if (!Array.isArray(queue)) throw new FoundryError('queue is not a list', 1);
-  const missing = requiredFor(s.stage, s.has_ui === true).filter((f) => !present(top, f));
+  const missing = requiredFor(s.stage, s.has_ui === true).map(asRecorded(s)).filter((f) => !satisfied((x) => present(top, x))(f));
   const open = queue.filter((q) => q && q.done === false).length;
   if (!missing.length && !open) return null;
   const names = missing.length ? missing.slice(0, 2).join(', ') : 'none';
   return `foundry: ${missing.length} missing for ${s.stage} (${names}), ${open} interview(s) queued; run foundry to see them.\n`;
 }
 
+// The nearest folder up from cwd holding .git (a dir, or a file in a worktree); the hook's repoTop without a git spawn.
+export function nearestTop(cwd = process.cwd()) {
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    if (dirname(dir) === dir) return cwd;
+  }
+}
+
 // SessionStart hook: prints its line or nothing. Always exits 0 and stays silent on any error.
 function hook() {
   try {
-    const line = hookLine(repoTop());
+    const line = hookLine(nearestTop());
     if (line) process.stdout.write(line);
   } catch {
     // A session must start whatever state the repo is in.
