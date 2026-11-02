@@ -115,7 +115,11 @@ There are four stages: `explore`, `product`, `live` and `scale`. Each one keeps 
 | `garden` | Reads the commits since the last pass for drift: copied workarounds, duplicated helpers, rules broken with no check failing. |
 | `tune` | Proposes AGENTS.md edits from what agents did in 10 or more real sessions, each with a quote. |
 
-Foundry never installs a skill or MCP server. It names the provider, why, a link and its license, and you decide. Some interviews wait for their moment (a design interview before the first screen, a threat model on entering `live`); they sit in a queue in the state file.
+To start, ask the agent to set the repository up for agents, or to audit its setup. With no command, foundry reports where the repository stands and offers the next step.
+
+Foundry never installs a skill or MCP server. It names the provider, why, a link and its license, and you decide.
+
+Some interviews wait for their moment: a design interview before the first screen, a threat model on entering `live`. They sit in a queue in the state file.
 
 ### The session-start hook
 
