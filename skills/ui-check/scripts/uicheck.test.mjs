@@ -619,9 +619,10 @@ test('approve writes the same line shapes as the template example', () => {
   // The template's commented example must not drift from what approve writes.
   const example = readFileSync(TEMPLATE, 'utf8').split('\n');
   const shape = (line) => line.replace(/\d{4}-\d{2}-\d{2}/g, 'DATE').replace(/[^ ()]+\.png/g, 'FILE').replace(/, [^)]+\)$/, ', NAME)');
-  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'docs/ui/mockups/home-360-light.png': 'png' });
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'docs/ui/mockups/home-360-light.png': 'png', 'src/home.tsx': 'x' });
   write(repo, '.ui-check/captures/home-360-light.png', 'light');
   write(repo, '.ui-check/captures/home-1440-light.png', 'wide');
+  assert.equal(run(repo, ['record', 'home']).code, 0);
   assert.equal(run(repo, ['approve', 'home', '--by', 'Some Owner', '--mockup', 'docs/ui/mockups/home-360-light.png']).code, 0);
   assert.equal(run(repo, ['approve', 'home', '--by', 'owner', '--captures']).code, 0);
   const written = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8').split('\n');
@@ -630,6 +631,11 @@ test('approve writes the same line shapes as the template example', () => {
     const got = written.find((l) => l.startsWith(`${key}: `));
     assert.equal(shape(got), shape(want), key);
   }
+  // last-capture: same shape, variants in the same (sorted) order as record writes them.
+  const capShape = (line) => line.replace(/\d{4}-\d{2}-\d{2}/g, 'DATE').replace(/sha256:[0-9a-f]{12}/g, 'HASH');
+  const wantCap = example.find((l) => l.startsWith('last-capture: '));
+  const gotCap = written.find((l) => l.startsWith('last-capture: '));
+  assert.equal(capShape(gotCap), capShape(wantCap), 'last-capture');
   const hash = example.find((l) => l.startsWith('last-capture: ')).split(' ')[2];
   assert.match(hash, /^sha256:[0-9a-f]{12}$/);
   assert.notEqual(hash, 'sha256:000000000000');
