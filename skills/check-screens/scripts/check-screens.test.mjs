@@ -841,3 +841,16 @@ test('reviewer: brief names the three dispositions and three tags', () => {
   assert.match(text, /https:\/\/github\.com\/pbakaus\/impeccable/);
   assert.match(text, /Apache-2\.0/);
 });
+
+test('packaging: plugin.json and marketplace.json name every skill folder', () => {
+  const root = join(HERE, '..', '..', '..');
+  const skills = readdirSync(join(root, 'skills'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  assert.ok(skills.includes('check-screens'));
+  const plugin = JSON.parse(readFileSync(join(root, '.claude-plugin', 'plugin.json'), 'utf8')).description;
+  const market = JSON.parse(readFileSync(join(root, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins.map((p) => p.description).join(' ');
+  for (const name of skills) {
+    const word = new RegExp(`(^|[^a-z0-9-])${name}($|[^a-z0-9-])`);
+    assert.match(plugin, word, `plugin.json description does not name ${name}`);
+    assert.match(market, word, `marketplace.json description does not name ${name}`);
+  }
+});

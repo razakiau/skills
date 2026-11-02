@@ -5,7 +5,7 @@
     {
       "name": "razakiau-skills",
       "source": "./",
-      "description": "no-slop, strategic-programming and foundry"
+      "description": "Agent skills: no-slop (prose editing), strategic-programming (code placement and diff audit), foundry (repo stages, agent docs and readiness audit) and check-screens (screen review before done)."
     }
   ]
 }

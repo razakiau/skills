@@ -2,6 +2,8 @@
 
 One file lists the app's screens: `docs/ui/screens.md`. When AGENTS.md has a line that starts with `Screen map: <path>` (a list marker before it is fine), the map lives at that path instead. A path outside the repo is refused.
 
+In a monorepo where the app is not at the repo top, use both settings. Add `Screen map: <app folder>/docs/ui/screens.md` to AGENTS.md so the map sits with the app, and set `CHECK_SCREENS_PLAYWRIGHT_FROM=<app folder>` for `capture` so it finds the app's Playwright ([providers.md](providers.md)).
+
 Read the map before you change a screen. Query it with the script instead of grepping routes or taking screenshots at random.
 
 ## The marker
