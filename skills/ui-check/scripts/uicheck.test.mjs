@@ -688,16 +688,54 @@ test('stale: routes from a file', () => {
   const r = run(repo, ['stale', '--routes', 'routes.json']);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.stdout, 'unmapped /settings\nstale: 0, gone: 0, unmapped: 1\n');
-  const bad = run(repo, ['stale', '--routes', '-'], '{"not": "an array"}');
-  assert.equal(bad.code, 1);
-  assert.match(bad.stderr, /^ui-check: routes must be a JSON array/);
-  const missing = run(repo, ['stale', '--routes', 'nope.json']);
-  assert.equal(missing.code, 1);
-  assert.equal(missing.stderr, 'ui-check: no routes file at nope.json\n');
 });
 
 test('stale: without routes says not checked', () => {
   const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
   const r = run(repo, ['stale']);
   assert.match(r.stdout, /^routes: not checked \(pass --routes\)$/m);
+});
+
+// fixes left from Task 3
+
+test('stale: a routes file that is missing or not JSON is a usage error', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  const missing = run(repo, ['stale', '--routes', 'nope.json']);
+  assert.equal(missing.code, 2);
+  assert.match(missing.stderr, /^ui-check: no routes file at nope\.json\n/);
+  const notJson = run(repo, ['stale', '--routes', '-'], '[/, oops');
+  assert.equal(notJson.code, 2);
+  assert.match(notJson.stderr, /^ui-check: routes are not JSON: /);
+  const notArray = run(repo, ['stale', '--routes', '-'], '{"not": "an array"}');
+  assert.equal(notArray.code, 2);
+  assert.match(notArray.stderr, /^ui-check: routes must be a JSON array/);
+  // Findings are not errors: an unmapped route still exits 0.
+  assert.equal(run(repo, ['stale', '--routes', '-'], '["/nowhere"]').code, 0);
+});
+
+test('fileHash, stale, record: a file outside the repo top counts as gone', () => {
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'uicheck-outside-')));
+  writeFileSync(join(outside, 'x.tsx'), 'x');
+  const map = [MARKER, '', '## home', 'route: /', `file: ../${outside.split('/').pop()}/x.tsx`, '',
+    '## report', 'route: /report', `file: ${join(outside, 'x.tsx')}`, ''].join('\n');
+  const repo = makeRepo({ 'docs/ui/screens.md': map });
+  // The sibling temp dir is reachable as ../<name> only when both sit in the same tmpdir.
+  assert.equal(existsSync(join(repo, '..', outside.split('/').pop(), 'x.tsx')), true);
+  for (const field of [`../${outside.split('/').pop()}/x.tsx`, join(outside, 'x.tsx')]) {
+    assert.equal(fileHash(repo, field), null, field);
+  }
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  write(repo, '.ui-check/captures/report-360-light.png', 'png');
+  const before = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8');
+  for (const name of ['home', 'report']) {
+    const r = run(repo, ['record', name]);
+    assert.equal(r.code, 1, name);
+    assert.match(r.stderr, new RegExp(`^ui-check: a file of ${name} is outside the repo: `));
+  }
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), before);
+  const r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^gone home \(\.\.\/.+\/x\.tsx\)$/m);
+  assert.match(r.stdout, /^gone report \(\/.+\/x\.tsx\)$/m);
+  assert.ok(r.stdout.endsWith('stale: 0, gone: 2, unmapped: 0\n'));
 });

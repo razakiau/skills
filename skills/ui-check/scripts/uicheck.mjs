@@ -336,11 +336,20 @@ async function captureCmd(args) {
   if (bad) throw new UiCheckError(`${bad} capture${bad > 1 ? 's' : ''} not valid; fix the page and capture again`, 1);
 }
 
+// Does `f`, relative to the repo top unless absolute, name a path inside it?
+function insideTop(top, f) {
+  const rel = relative(top, resolve(top, f));
+  return Boolean(rel) && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
+}
+
+// A `file:` path that is missing or resolves outside the repo top: the map cannot vouch for it.
+const goneFile = (top, f) => !insideTop(top, f) || !existsSync(join(top, f));
+
 // `sha256:` plus 12 hex over the bytes of the entry's files, sorted by path and joined with a NUL byte.
-// null when the field lists no file or any listed file is missing.
+// null when the field lists no file or any listed file is gone (missing or outside the repo top).
 export function fileHash(top, fileField) {
   const files = list(fileField).sort();
-  if (!files.length || files.some((f) => !existsSync(join(top, f)))) return null;
+  if (!files.length || files.some((f) => goneFile(top, f))) return null;
   const parts = files.flatMap((f, i) => (i ? [Buffer.from([0]), readFileSync(join(top, f))] : [readFileSync(join(top, f))]));
   return 'sha256:' + createHash('sha256').update(Buffer.concat(parts)).digest('hex').slice(0, 12);
 }
@@ -441,6 +450,8 @@ function recordCmd(args) {
   const files = capturesOf(dir, entry.slug);
   if (!files.length) throw noCaptures(entry, dir, shown);
   if (!list(entry.fields.file).length) throw new UiCheckError(`screen ${entry.name} has no file: line; add one before record`, 1);
+  const outside = list(entry.fields.file).filter((f) => !insideTop(top, f));
+  if (outside.length) throw new UiCheckError(`a file of ${entry.name} is outside the repo: ${outside.join(', ')}`, 1);
   const hash = fileHash(top, entry.fields.file);
   if (!hash) throw new UiCheckError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
   const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();
@@ -477,8 +488,8 @@ function approveCmd(args) {
 // The route strings of a JSON array of strings or `{ path }` objects.
 function parseRoutes(raw) {
   let data;
-  try { data = JSON.parse(raw); } catch (err) { throw new UiCheckError(`routes are not JSON: ${err.message}`, 1); }
-  const bad = () => new UiCheckError('routes must be a JSON array of strings or {"path": ...} objects', 1);
+  try { data = JSON.parse(raw); } catch (err) { throw new UiCheckError(`routes are not JSON: ${err.message}`, 2); }
+  const bad = () => new UiCheckError('routes must be a JSON array of strings or {"path": ...} objects', 2);
   if (!Array.isArray(data)) throw bad();
   return data.map((r) => {
     if (typeof r === 'string') return r;
@@ -488,7 +499,8 @@ function parseRoutes(raw) {
 }
 
 // Reports entries whose files changed since last-capture, entries whose files are gone and
-// routes with no entry. It never edits anything, so it exits 0 whatever it finds.
+// routes with no entry. It never edits anything, so it exits 0 whatever it finds;
+// a routes file that is missing or not a JSON route list is a usage error (2).
 function staleCmd(args) {
   const { options } = parseArgs(args, { options: ['--routes'] });
   const top = repoTop();
@@ -500,7 +512,7 @@ function staleCmd(args) {
     const field = s.fields.file;
     const files = list(field);
     if (!files.length) continue;
-    const missing = files.filter((f) => !existsSync(join(top, f)));
+    const missing = files.filter((f) => goneFile(top, f));
     if (missing.length) {
       out.push(`gone ${s.name} (${missing.join(', ')})`);
       gone++;
@@ -516,7 +528,7 @@ function staleCmd(args) {
   const from = options['--routes'];
   if (from === undefined) out.push('routes: not checked (pass --routes)');
   else {
-    if (from !== '-' && !existsSync(resolve(process.cwd(), from))) throw new UiCheckError(`no routes file at ${from}`, 1);
+    if (from !== '-' && !existsSync(resolve(process.cwd(), from))) throw new UiCheckError(`no routes file at ${from}`, 2);
     const raw = from === '-' ? readFileSync(0, 'utf8') : readFileSync(resolve(process.cwd(), from), 'utf8');
     const mapped = new Set(screens.map((s) => s.fields.route).filter(Boolean));
     for (const r of new Set(parseRoutes(raw))) {
