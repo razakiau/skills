@@ -57,7 +57,7 @@ const UI_FILE = /\.(tsx|jsx|vue|svelte|html)$/;
 const UI_DIRS = ['web/', 'apps/web/', 'frontend/'];
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?|e2e|fixtures?)\/|\.(test|spec)\.[^/]+$/;
 const AUTH_PATH = /(auth|session|login|tenant|rbac|permission)/i;
-const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/;
+const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/i;
 const COMPOSE_FILE = /^(docker-)?compose\.y[a-z]*ml$/;
 const NAMES_USERS = /\busers?\b/i;
 
@@ -69,21 +69,74 @@ function gitOut(top, args) {
   }
 }
 
-const skipped = (path) => path.split('/').some((part) => part === 'node_modules' || part === '.git');
-
-// Repo-relative file paths, sorted: git's view (tracked and untracked, not ignored) in a work tree, else a walk.
-function listFiles(top) {
-  const out = gitOut(top, ['ls-files', '--cached', '--others', '--exclude-standard']);
-  const files = out !== null
-    ? out.split('\n').filter(Boolean)
-    : readdirSync(top, { recursive: true, withFileTypes: true })
-      .filter((d) => d.isFile())
-      .map((d) => join(d.parentPath, d.name).slice(top.length + 1));
-  return files.filter((f) => !skipped(f)).sort();
-}
-
 const readText = (path) => { try { return readFileSync(path, 'utf8'); } catch { return ''; } };
 const real = (path) => { try { return realpathSync(path); } catch { return path; } };
+
+const SKIP_DIRS = new Set(['node_modules', '.git']);
+const skipped = (path) => path.split('/').some((part) => SKIP_DIRS.has(part));
+
+// Every file under dir, repo-relative; never descends into node_modules or .git.
+function walk(top, dir = top, out = []) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const d of entries) {
+    if (SKIP_DIRS.has(d.name)) continue;
+    const path = join(dir, d.name);
+    if (d.isDirectory()) walk(top, path, out);
+    else if (d.isFile()) out.push(path.slice(top.length + 1));
+  }
+  return out;
+}
+
+// Is top the work tree's own top? A folder without git of its own inside another repo is not.
+const ownRepo = (top) => {
+  const t = gitOut(top, ['rev-parse', '--show-toplevel']);
+  return t !== null && real(t) === real(top);
+};
+
+// Where signals reads the repo from: the work tree, or the tree of one commit (--as-of).
+function worktreeSource(top) {
+  const git = ownRepo(top);
+  const out = git ? gitOut(top, ['ls-files', '--cached', '--others', '--exclude-standard']) : null;
+  const files = (out !== null ? out.split('\n').filter(Boolean) : walk(top)).filter((f) => !skipped(f)).sort();
+  return { git, rev: 'HEAD', files, read: (f) => readText(join(top, f)), has: (f) => present(top, f) };
+}
+
+function commitSource(top, rev) {
+  const out = gitOut(top, ['ls-tree', '-r', '--name-only', '-z', rev]);
+  if (out === null) throw new FoundryError(`--as-of ${rev} is not a commit in this repo`, 2);
+  const files = out.split('\0').filter(Boolean).filter((f) => !skipped(f)).sort();
+  const set = new Set(files);
+  const has = (f) => (f.endsWith('/') ? files.some((x) => x.startsWith(f)) : set.has(f));
+  const read = (f) => (set.has(f) ? gitOut(top, ['show', `${rev}:${f}`]) ?? '' : '');
+  return { git: true, rev, files, read, has };
+}
+
+// The first commit at or before an ISO date or a commit-ish.
+function resolveAsOf(top, asOf) {
+  if (/^\d{4}-\d{2}-\d{2}/.test(asOf)) {
+    // A bare date means the end of that day, local time, as git reads --before.
+    const when = asOf.length === 10 ? `${asOf}T23:59:59` : asOf;
+    const date = Date.parse(when);
+    if (Number.isNaN(date)) throw new FoundryError(`--as-of ${asOf} is not a date`, 2);
+    const sha = gitOut(top, ['rev-list', '-1', `--before=${when}`, 'HEAD']);
+    if (!sha) throw new FoundryError(`--as-of ${asOf}: no commit on or before that date`, 2);
+    return { sha, date };
+  }
+  const sha = gitOut(top, ['rev-parse', '--verify', '-q', `${asOf}^{commit}`]);
+  if (!sha) throw new FoundryError(`--as-of ${asOf} is not a commit in this repo`, 2);
+  return { sha, date: Date.parse(gitOut(top, ['show', '-s', '--format=%cI', sha])) };
+}
+
+// Commits on the upstream (or origin's default branch) that HEAD lacks, from the last fetch; null when unknown.
+function behindUpstream(top) {
+  const up = gitOut(top, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
+    ?? gitOut(top, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD']);
+  if (!up) return null;
+  const n = Number(gitOut(top, ['rev-list', '--count', `HEAD..${up}`]));
+  return Number.isFinite(n) ? { ref: up, commits: n } : null;
+}
+
 const within = (path, top) => path === top || path.startsWith(top + '/');
 
 // `owner/repo` from the origin URL (https or scp-style), or null.
@@ -115,16 +168,17 @@ function matchingSessions(top, root) {
   return ids;
 }
 
-function deployEvidence(top, files) {
+function deployEvidence(src) {
+  const { files, read } = src;
   const found = [];
   for (const f of files) {
-    if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(readText(join(top, f)))) found.push(f);
+    if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(read(f))) found.push(f);
   }
   for (const f of files) {
-    if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(readText(join(top, f)))) found.push(f);
+    if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(read(f))) found.push(f);
   }
   if (files.includes('Dockerfile')) found.push('Dockerfile');
-  for (const url of readText(join(top, 'README.md')).match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
+  for (const url of read('README.md').match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
     let host = '';
     try { host = new URL(url).hostname; } catch { continue; }
     if (host !== 'github.com' && !host.endsWith('.github.com')) { found.push(`README.md: ${url}`); break; }
@@ -139,23 +193,27 @@ function present(top, file) {
 }
 
 // What the repo shows about its stage, and the stage to propose. The owner decides.
+// opts.asOf (an ISO date or a commit) reads the repo as it was then; sessions are then left out.
 export function signals(top, opts = {}) {
   const sessionsRoot = opts.sessionsRoot ?? COPILOT_SESSIONS();
-  const recorded = readState(top);
-  const files = listFiles(top);
+  const asOf = opts.asOf ? resolveAsOf(top, opts.asOf) : null;
+  const src = asOf ? commitSource(top, asOf.sha) : worktreeSource(top);
+  const recorded = asOf ? null : readState(top);
+  const { files } = src;
+  const now = asOf ? asOf.date : Date.now();
 
-  const commits = Number(gitOut(top, ['rev-list', '--count', 'HEAD']) ?? 0) || 0;
-  const roots = commits ? (gitOut(top, ['log', '--max-parents=0', '--format=%cI', 'HEAD']) ?? '').split('\n').filter(Boolean).sort() : [];
+  const commits = src.git ? Number(gitOut(top, ['rev-list', '--count', src.rev]) ?? 0) || 0 : 0;
+  const roots = commits ? (gitOut(top, ['log', '--max-parents=0', '--format=%cI', src.rev]) ?? '').split('\n').filter(Boolean).sort() : [];
   const first_commit = roots[0] ?? null;
-  const age_days = first_commit ? Math.max(0, Math.floor((Date.now() - Date.parse(first_commit)) / DAY_MS)) : 0;
+  const age_days = first_commit ? Math.max(0, Math.floor((now - Date.parse(first_commit)) / DAY_MS)) : 0;
 
   const has_ui = files.some((f) => UI_FILE.test(f) && !TEST_PATH.test(f))
-    || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || present(top, d));
-  const deployed = deployEvidence(top, files);
+    || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || src.has(d));
+  const deployed = deployEvidence(src);
   const auth_code = files.filter((f) => AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
-  const sessions = matchingSessions(top, sessionsRoot)?.length ?? null;
-  const hasProduct = present(top, 'PRODUCT.md');
-  const namesUsers = NAMES_USERS.test(readText(join(top, 'README.md')));
+  const sessions = asOf ? null : matchingSessions(top, sessionsRoot)?.length ?? null;
+  const hasProduct = src.has('PRODUCT.md');
+  const namesUsers = NAMES_USERS.test(src.read('README.md'));
 
   const productReasons = [
     commits >= PRODUCT_COMMITS && `${commits} commits`,
@@ -183,16 +241,32 @@ export function signals(top, opts = {}) {
   if (!reasons.length) reasons.push('no signal beyond explore');
 
   const required = requiredFor(proposed, has_ui);
-  const fileMap = Object.fromEntries(required.map((f) => [f, present(top, f)]));
+  const fileMap = Object.fromEntries(required.map((f) => [f, src.has(f)]));
+  const behind = asOf || !src.git ? null : behindUpstream(top);
 
-  return { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind };
+  if (asOf) out.as_of = asOf.sha;
+  return out;
 }
 
+// A checkout this far behind its upstream may be missing the docs it is asked about.
+const BEHIND_WARN = 10;
+
 function signalsCmd(args) {
-  for (const a of args) if (a !== '--json') throw new FoundryError(`unknown argument ${a}`, 2);
-  const s = signals(repoTop());
-  if (args.includes('--json')) process.stdout.write(JSON.stringify(s, null, 2) + '\n');
-  else process.stdout.write(`proposed stage: ${s.proposed}\n${s.reasons.map((r) => `- ${r}\n`).join('')}`);
+  let asOf = null;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--json') json = true;
+    else if (args[i] === '--as-of') {
+      asOf = args[++i];
+      if (!asOf) throw new FoundryError('--as-of needs a date or a commit', 2);
+    } else throw new FoundryError(`unknown argument ${args[i]}`, 2);
+  }
+  const s = signals(repoTop(), { asOf });
+  if (json) { process.stdout.write(JSON.stringify(s, null, 2) + '\n'); return; }
+  const head = s.as_of ? `proposed stage as of ${s.as_of.slice(0, 7)}: ${s.proposed}` : `proposed stage: ${s.proposed}`;
+  const warn = s.behind && s.behind.commits >= BEHIND_WARN ? `warn: ${s.behind.commits} commits behind ${s.behind.ref}; pull before trusting the files list\n` : '';
+  process.stdout.write(`${head}\n${s.reasons.map((r) => `- ${r}\n`).join('')}${warn}`);
 }
 
 function today() {

@@ -202,6 +202,76 @@ test('signals: non-git dir', () => {
   assert.deepEqual(s.files, { 'AGENTS.md': true });
 });
 
+test('signals: a non-git walk skips node_modules', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-nogit-')));
+  write(dir, 'node_modules/pkg/App.tsx', 'x');
+  write(dir, 'node_modules/pkg/src/auth.ts', 'x');
+  const s = signals(dir, NO_SESSIONS);
+  assert.equal(s.has_ui, false);
+  assert.deepEqual(s.auth_code, []);
+});
+
+test('signals: a folder without git inside another repo has no history of its own', () => {
+  const parent = makeRepo({ 'a.txt': 'x' });
+  for (let i = 0; i < 31; i++) git(parent, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  write(parent, 'sub/AGENTS.md', 'x\n');
+  const s = signals(join(parent, 'sub'), NO_SESSIONS);
+  assert.equal(s.commits, 0);
+  assert.equal(s.first_commit, null);
+  assert.equal(s.proposed, 'explore');
+  assert.deepEqual(s.files, { 'AGENTS.md': true });
+  assert.equal(s.behind, null);
+});
+
+test('signals: a deploy workflow is found whatever its case', () => {
+  const repo = makeRepo({ '.github/workflows/ship.yml': 'jobs:\n  Deploy:\n    runs-on: x\n', 'src/auth/login.ts': 'x' });
+  const s = signals(repo, NO_SESSIONS);
+  assert.deepEqual(s.deployed, ['.github/workflows/ship.yml']);
+  assert.equal(s.proposed, 'live');
+});
+
+test('signals --as-of reads the tree and the age of a past commit', () => {
+  const repo = makeRepo({ 'a.txt': 'x' });
+  const env = { GIT_AUTHOR_DATE: '2026-01-01T12:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T12:00:00Z' };
+  execFileSync('git', ['commit', '-q', '--amend', '--no-edit', '--reset-author'], { cwd: repo, env: { ...process.env, ...env } });
+  const at = (d) => ({ ...process.env, GIT_AUTHOR_DATE: d, GIT_COMMITTER_DATE: d });
+  write(repo, 'src/App.tsx', 'x');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['commit', '-q', '-m', 'ui'], { cwd: repo, env: at('2026-01-10T12:00:00Z') });
+  write(repo, 'PRODUCT.md', 'p');
+  execFileSync('git', ['add', '-A'], { cwd: repo });
+  execFileSync('git', ['commit', '-q', '-m', 'product'], { cwd: repo, env: at('2026-02-01T12:00:00Z') });
+  const early = signals(repo, { ...NO_SESSIONS, asOf: '2026-01-05' });
+  assert.equal(early.commits, 1);
+  assert.equal(early.age_days, 4);
+  assert.equal(early.has_ui, false);
+  assert.equal(early.proposed, 'explore');
+  assert.equal(early.sessions, null);
+  const mid = signals(repo, { ...NO_SESSIONS, asOf: '2026-01-10' });
+  assert.equal(mid.has_ui, true);
+  assert.equal(mid.proposed, 'product', 'nine days old');
+  assert.equal(mid.files['PRODUCT.md'], false, 'PRODUCT.md came later');
+  const sha = git(repo, 'rev-parse', 'HEAD~1');
+  assert.equal(signals(repo, { ...NO_SESSIONS, asOf: sha }).as_of, sha);
+  const cli = run(repo, ['signals', '--as-of', '2026-01-05']);
+  assert.equal(cli.stdout, `proposed stage as of ${git(repo, 'rev-parse', 'HEAD~2').slice(0, 7)}: explore\n- no signal beyond explore\n`);
+  const bad = run(repo, ['signals', '--as-of', '2025-01-01']);
+  assert.deepEqual([bad.code, bad.stderr], [2, 'foundry: --as-of 2025-01-01: no commit on or before that date\n']);
+  assert.equal(run(repo, ['signals', '--as-of']).code, 2);
+});
+
+test('signals: a checkout far behind its upstream says so', () => {
+  const origin = makeRepo({ 'a.txt': 'x' });
+  const clone = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-clone-')));
+  execFileSync('git', ['clone', '-q', origin, clone]);
+  for (let i = 0; i < 10; i++) git(origin, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  git(clone, 'fetch', '-q');
+  const s = signals(clone, NO_SESSIONS);
+  assert.deepEqual(s.behind, { ref: 'origin/main', commits: 10 });
+  assert.match(run(clone, ['signals']).stdout, /^warn: 10 commits behind origin\/main; pull before trusting the files list$/m);
+  assert.equal(signals(origin, NO_SESSIONS).behind, null, 'no upstream');
+});
+
 test('signals: git repo with no commits yet', () => {
   const repo = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-test-')));
   git(repo, 'init', '-q', '-b', 'main');

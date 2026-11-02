@@ -13,7 +13,7 @@ Each snapshot is a throwaway clone under `mktemp -d`. Never use your working che
 2. Follow [../reference/audit.md](../reference/audit.md) step by step, as an agent would. If the repo has no check command, run `sh <skill dir>/templates/doc-check.sh` from the repo top; it only reads. Audit writes nothing, so `git status` stays clean.
 3. Keep the audit report.
 
-Score a snapshot at the stage you were actually working at. Next to it, record the stage `signals` gives for the snapshot date. `signals` measures `age_days` from today, not from the snapshot, so in a replay it can propose a later stage than the date would have given.
+Score a snapshot at the stage you were actually working at. Next to it, record the stage `signals --as-of <snapshot commit>` gives. With `--as-of`, `signals` reads that commit's tree and measures `age_days` at its date, and it leaves sessions out, since it cannot tell which sessions existed then.
 
 ## The "needed later" list
 
