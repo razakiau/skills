@@ -13,9 +13,9 @@ file: src/home.html
 purpose: the first screen; shows today's summary and links to the report
 family: tab-root
 states: empty, loaded, error
-mockup: docs/ui/mockups/home-360-light.png
+mockup: docs/ui/mockups/home-360-light.png (approved 2026-01-01, owner)
 design-source: docs/ui/tokens.css
 siblings: report, settings
-last-capture: 2026-01-01 sha256:000000000000 360-light 1440-light
-approved: 2026-01-01 by owner
+last-capture: 2026-01-01 sha256:3f9a1c07b2e4 1440-light 360-light
+approved: docs/ui/approved/home-1440-light.png docs/ui/approved/home-360-light.png (2026-01-01, owner)
 -->

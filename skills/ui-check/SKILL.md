@@ -33,12 +33,12 @@ First pick the size of the loop from the table in [reference/loop.md](reference/
 | `map [--json] [<screen> \| --family <family> \| --sibling-of <screen>]` | Prints screen names, one entry, a family or the siblings of a screen | the screen is unknown |
 | `init` | Writes `docs/ui/screens.md` from [templates/screens.md](templates/screens.md) and adds `.ui-check/` to `.gitignore` | the file at that path is not a ui-check map |
 | `capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .ui-check/captures]` | Writes one PNG per width and theme; exits 3 with no Playwright | the URL fails, or a page is blank or shows an error overlay |
-| `touched [<base>]` | Lists the screens and shared UI files changed since `<base>` (default `HEAD`) | git cannot diff against `<base>` |
+| `touched [<base>]` | Lists the screens and shared UI files changed since `<base>` (default `HEAD`) | git cannot diff against `<base>`; outside a git repo it exits 2 (`touched needs git`) |
 | `record <screen> [--out .ui-check/captures]` | Writes `last-capture:` with today, the file hash and the variants found | there are no captures, or a `file:` is missing or outside the repo |
 | `approve <screen> --by <name> (--mockup <path> \| --captures) [--out .ui-check/captures]` | Records the owner's approval; `--captures` copies to `docs/ui/approved/` | the mockup or the captures are missing |
-| `stale [--routes <file\|->]` | Reports `stale`, `gone` and `unmapped` entries; edits nothing | no finding does; findings exit 0 |
+| `stale [--routes <file\|->]` | Reports `stale`, `gone` and `unmapped` entries; edits nothing | never for findings; a bad routes file exits 2 |
 
-Every command exits 0 on success and 2 on a usage error, printing the usage. Every command but `init` and `capture` also exits 1 when the map is missing or foreign. Each failure ends with one line on stderr starting `ui-check: `.
+Every command exits 0 on success and 2 on a usage error. Every command but `init` and `capture` also exits 1 when the map is missing or foreign. On any failure, the first line on stderr starts with `ui-check: `; a usage error (exit 2) then prints the usage text. A missing or unknown command prints only the usage text.
 
 ## Rules
 
