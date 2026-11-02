@@ -1254,6 +1254,35 @@ test('digest: matches by cwd and repository, skips others', () => {
   assert.deepEqual(digest(repo, NO_SESSIONS), []);
 });
 
+test('digest: the newest sessions win the limit; names are capped; a quoted type name is kept', () => {
+  const repo = makeRepo();
+  const start = (t) => ({ type: 'session.start', data: { sessionId: 'x', startTime: t, context: {} }, id: 'e1', timestamp: t, parentId: null });
+  const tool = (name, args = {}) => ({ type: 'tool.execution_start', data: { toolName: name, arguments: args }, id: 'e3', timestamp: 't', parentId: 'e1' });
+  const msg = (text) => ({ type: 'user.message', data: { content: text }, id: 'e2', timestamp: 't', parentId: 'e1' });
+  const root = copilotRoot([
+    { id: 'old', workspace: [`cwd: ${repo}`], events: [start('2026-01-01T00:00:00.000Z'), '{not json'] },
+    { id: 'new', workspace: [`cwd: ${repo}`], events: [start('2026-02-01T00:00:00.000Z'), tool('x'.repeat(500)), tool('skill', { skill: 'y'.repeat(500) }), msg('why did "tool.execution_complete" show up?')] },
+  ]);
+  writeFileSync(join(root, 'old', 'events.jsonl'), JSON.stringify(start('2026-01-01T00:00:00.000Z')) + '\n');
+  const one = digest(repo, { sessionsRoot: root, limit: 1 });
+  assert.deepEqual(one.map((d) => d.id), ['new']);
+  assert.equal(one[0].tools[0].length, 80);
+  assert.equal(one[0].skills[0], 'y'.repeat(80));
+  assert.deepEqual(one[0].user, ['why did "tool.execution_complete" show up?']);
+});
+
+test('digest: a transcript line longer than a read chunk is read whole', () => {
+  const repo = makeRepo();
+  const long = 'z'.repeat((1 << 20) * 2 + 17);
+  const root = copilotRoot([{ id: 's', workspace: [`cwd: ${repo}`], events: [
+    { type: 'session.start', data: { startTime: '2026-01-01T00:00:00.000Z' } },
+    { type: 'user.message', data: { content: long } },
+    { type: 'user.message', data: { content: 'after' } },
+  ] }]);
+  const [d] = digest(repo, { sessionsRoot: root });
+  assert.deepEqual(d.user, ['z'.repeat(500), 'after']);
+});
+
 test('digest CLI: summary lines, --json, --limit and bad arguments', () => {
   const repo = makeRepo();
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-home-')));
@@ -1305,8 +1334,10 @@ test('garden-range: null last means last 50; --mark records HEAD', () => {
 test('garden-range: fewer than 50 commits starts at the root; errors', () => {
   const repo = withState();
   commitN(repo, 3);
-  const root = git(repo, 'rev-list', '--max-parents=0', 'HEAD');
-  assert.deepEqual(gardenRange(repo), { from: root, to: git(repo, 'rev-parse', 'HEAD'), commits: 3 });
+  const empty = git(repo, 'hash-object', '-t', 'tree', '/dev/null');
+  const all = Number(git(repo, 'rev-list', '--count', 'HEAD'));
+  assert.deepEqual(gardenRange(repo), { from: empty, to: git(repo, 'rev-parse', 'HEAD'), commits: all });
+  assert.equal(git(repo, 'log', '--format=%s', `${empty}..HEAD`).split('\n').length, all, 'the root commit is in the range');
   const noState = makeRepo();
   assert.equal(run(noState, ['garden-range']).code, 0, 'reading works without a state file');
   const mark = run(noState, ['garden-range', '--mark']);

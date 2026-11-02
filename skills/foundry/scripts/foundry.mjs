@@ -566,10 +566,17 @@ function vendorCheckCmd(args) {
 
 const DIGEST_LIMIT = 30;
 const USER_CHARS = 500;
+// Tool and skill names come from the transcript; a pathological one must not blow up the digest.
+const NAME_CHARS = 80;
+const NAMES_PER_SESSION = 200;
+// How far into events.jsonl to look for session.start when only sorting.
+const START_SCAN_LINES = 20;
 const CHUNK = 1 << 20;
 const NEWLINE = 0x0a;
 // Tool output can hold secrets. Its lines are dropped on these bytes, before any decoding or parsing.
-const TOOL_OUTPUT = Buffer.from('"tool.execution_complete"');
+// The bytes are the event's own type field, so a user message that quotes the type name is kept.
+const TOOL_OUTPUT = [Buffer.from('{"type":"tool.execution_complete"'), Buffer.from('"type":"tool.execution_complete","data"')];
+const isToolOutput = (raw) => TOOL_OUTPUT.some((b) => raw.includes(b));
 
 // Each line of a file, as a Buffer, read in chunks so a large transcript never sits in memory whole.
 function* lines(path) {
@@ -577,13 +584,18 @@ function* lines(path) {
   try { fd = openSync(path, 'r'); } catch { return; }
   try {
     const buf = Buffer.alloc(CHUNK);
-    let rest = Buffer.alloc(0);
+    // A line longer than a chunk is kept as a list of pieces and joined once, so no byte is copied twice.
+    let parts = [];
     for (let n; (n = readSync(fd, buf, 0, CHUNK, null)) > 0;) {
-      let chunk = Buffer.concat([rest, buf.subarray(0, n)]);
-      for (let nl; (nl = chunk.indexOf(NEWLINE)) !== -1; chunk = chunk.subarray(nl + 1)) yield chunk.subarray(0, nl);
-      rest = Buffer.from(chunk);
+      let chunk = buf.subarray(0, n);
+      for (let nl; (nl = chunk.indexOf(NEWLINE)) !== -1; chunk = chunk.subarray(nl + 1)) {
+        const head = chunk.subarray(0, nl);
+        yield parts.length ? Buffer.concat([...parts, head]) : Buffer.from(head);
+        parts = [];
+      }
+      if (chunk.length) parts.push(Buffer.from(chunk));
     }
-    if (rest.length) yield rest;
+    if (parts.length) yield Buffer.concat(parts);
   } finally {
     closeSync(fd);
   }
@@ -599,8 +611,9 @@ function digestSession(dir, id) {
   const tools = new Set();
   const skills = new Set();
   let compactions = 0;
+  const cap = (v) => Array.from(v).slice(0, NAME_CHARS).join('');
   for (const raw of lines(join(dir, 'events.jsonl'))) {
-    if (raw.includes(TOOL_OUTPUT)) continue;
+    if (isToolOutput(raw)) continue;
     let e;
     try { e = JSON.parse(raw.toString('utf8')); } catch { continue; }
     if (!isObject(e) || !isObject(e.data)) continue;
@@ -613,8 +626,8 @@ function digestSession(dir, id) {
       const name = e.data.toolName;
       if (typeof name !== 'string') continue;
       const args = isObject(e.data.arguments) ? e.data.arguments : {};
-      tools.add(`${name}(${Object.keys(args).join(',')})`);
-      if (name === 'skill' && typeof args.skill === 'string') skills.add(args.skill);
+      if (tools.size < NAMES_PER_SESSION) tools.add(cap(`${name}(${Object.keys(args).join(',')})`));
+      if (name === 'skill' && typeof args.skill === 'string' && skills.size < NAMES_PER_SESSION) skills.add(cap(args.skill));
     } else if (e.type === 'session.compaction_start') {
       compactions++;
     }
@@ -623,13 +636,27 @@ function digestSession(dir, id) {
   return { id, started, user, tools: [...tools], skills: [...skills], compactions };
 }
 
-// The Copilot sessions of this repo, newest first by start time.
+// A session's start time from the first lines of its transcript, else workspace.yaml; never the whole file.
+function sessionStart(dir) {
+  let n = 0;
+  for (const raw of lines(join(dir, 'events.jsonl'))) {
+    if (++n > START_SCAN_LINES) break;
+    if (isToolOutput(raw)) continue;
+    let e;
+    try { e = JSON.parse(raw.toString('utf8')); } catch { continue; }
+    if (e?.type === 'session.start' && typeof e.data?.startTime === 'string') return e.data.startTime;
+  }
+  return yamlValue(readText(join(dir, 'workspace.yaml')), 'created_at');
+}
+
+// The Copilot sessions of this repo, newest first by start time. Only the newest `limit` are read in full.
 export function digest(top, { sessionsRoot = COPILOT_SESSIONS(), limit = DIGEST_LIMIT } = {}) {
   const ids = matchingSessions(top, sessionsRoot) ?? [];
-  const all = ids.map((id) => digestSession(join(sessionsRoot, id), id));
-  const time = (d) => Date.parse(d.started ?? '') || 0;
-  all.sort((a, b) => time(b) - time(a) || a.id.localeCompare(b.id));
-  return all.slice(0, limit);
+  const time = (t) => Date.parse(t ?? '') || 0;
+  const newest = ids.map((id) => ({ id, started: sessionStart(join(sessionsRoot, id)) }))
+    .sort((a, b) => time(b.started) - time(a.started) || a.id.localeCompare(b.id))
+    .slice(0, limit);
+  return newest.map(({ id }) => digestSession(join(sessionsRoot, id), id));
 }
 
 function digestCmd(args) {
@@ -651,6 +678,7 @@ function digestCmd(args) {
 // ---- garden-range ----
 
 const GARDEN_DEFAULT = 50;
+const EMPTY_TREE = (top) => gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
 
 // The commits since the last garden pass, or the last 50 (from the root when there are fewer), as git's from..to.
 export function gardenRange(top) {
@@ -665,10 +693,13 @@ export function gardenRange(top) {
     }
     from = known;
   } else {
+    // With fewer than 50 commits, start before the root: the empty tree, so the root commit is in the range.
     from = gitOut(top, ['rev-parse', '--verify', '-q', `HEAD~${GARDEN_DEFAULT}^{commit}`])
-      ?? gitOut(top, ['rev-list', '--max-parents=0', 'HEAD']).split('\n')[0];
+      ?? gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
   }
-  const commits = Number(gitOut(top, ['rev-list', '--count', `${from}..${to}`])) || 0;
+  const commits = from === EMPTY_TREE(top)
+    ? Number(gitOut(top, ['rev-list', '--count', to])) || 0
+    : Number(gitOut(top, ['rev-list', '--count', `${from}..${to}`])) || 0;
   return { from, to, commits };
 }
 
