@@ -1,11 +1,12 @@
 # skills
 
-Two agent skills, packaged as one plugin for Claude Code, GitHub Copilot CLI and VS Code.
+Three agent skills, packaged as one plugin for Claude Code, GitHub Copilot CLI and VS Code.
 
 | Skill | What it does |
 |---|---|
 | [`no-slop`](skills/no-slop/SKILL.md) | Edits prose so it reads like its writer, or audits it for AI-writing patterns without rewriting. |
 | [`strategic-programming`](skills/strategic-programming/SKILL.md) | Places a code change in the layer that owns it, then measures the diff and makes the agent answer for what it added. |
+| [`foundry`](skills/foundry/SKILL.md) | Gives a repository a stage, writes the docs that stage requires for agents, and audits it before real users arrive. |
 
 ## Install
 
@@ -31,7 +32,7 @@ copilot plugin install razakiau-skills@razakiau
 "chat.pluginLocations": { "/path/to/skills": true }
 ```
 
-**Skills only**: copy a folder from `skills/` into your agent's skills directory (`~/.claude/skills/`, `.github/skills/`, ...). `strategic-programming`'s end-of-turn hook comes with the plugin only; without it, the skill still runs its own audit step.
+**Skills only**: copy a folder from `skills/` into your agent's skills directory (`~/.claude/skills/`, `.github/skills/`, ...). `strategic-programming`'s end-of-turn hook and `foundry`'s session-start line come with the plugin only; without them, both skills still work when called.
 
 ## no-slop
 
@@ -96,6 +97,42 @@ With the plugin installed, a hook (`hooks/hooks.json`) audits the agent's own ch
 - `audit --dup` runs [jscpd](https://github.com/kucherenko/jscpd) 5.4.1 through `npx`, so it needs network access on first use.
 
 Tests: `node --test skills/strategic-programming/scripts/sp.test.mjs`.
+
+## foundry
+
+A new repository needs little: an AGENTS.md and room to try things. A repository with real users needs a product brief, recorded decisions, an architecture map, a threat model and runbooks. Most repositories get these late, or never, and the agents working in them guess. This skill ties the docs to the stage the repository is in.
+
+There are four stages: `explore`, `product`, `live` and `scale`. Each one keeps what the previous one requires and adds its own files ([`reference/stages.md`](skills/foundry/reference/stages.md)). The stage is recorded in `.agents/foundry.json`, and a bundled script reads the evidence for the next one: commits, age, agent sessions, UI files, a deploy setup, auth code.
+
+| Command | What it does |
+|---|---|
+| (none) | Reports the stage, the missing files and the queued interviews, and offers the next command. |
+| `init` | Sets the stage and writes its files. An existing AGENTS.md stays as it is until you approve a change. |
+| `audit` | Reports what the repository has and lacks for its stage, readiness list included. Writes nothing. |
+| `grow` | Moves to the next stage and adds what it requires. |
+| `providers` | Maps each kind of work to a skill or tool the agent already has, or to foundry's fallback. |
+| `check` | Runs the repository's one check command, doc check included, and says who owns each failure. |
+| `garden` | Reads the commits since the last pass for drift: copied workarounds, duplicated helpers, rules broken with no check failing. |
+| `tune` | Proposes AGENTS.md edits from what agents did in 10 or more real sessions, each with a quote. |
+
+Foundry never installs a skill or MCP server. It names the provider, why, a link and its license, and you decide. Some interviews wait for their moment (a design interview before the first screen, a threat model on entering `live`); they sit in a queue in the state file.
+
+### The session-start hook
+
+With the plugin installed, a hook prints one line when a session starts in a repository that has `.agents/foundry.json` and something to do:
+
+```text
+foundry: 5 missing for product (PRODUCT.md, docs/decisions/index.md), 2 interview(s) queued; run foundry to see them.
+```
+
+When nothing is missing and no interview is queued, or the repository has no state file, it prints nothing. It only checks that files exist, and on any error it stays silent.
+
+### Requirements
+
+- Node.js 18 or later. git is optional: outside a repository, the script reads the folder.
+- The vendored doc check, `.agents/doc-check.sh`, runs with POSIX `sh`, `grep`, `sed`, `find` and `awk`.
+
+Tests: `node --test skills/foundry/scripts/foundry.test.mjs`.
 
 ## Credits
 
