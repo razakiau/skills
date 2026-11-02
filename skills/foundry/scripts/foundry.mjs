@@ -38,7 +38,7 @@ export function writeState(top, state) {
 
 // Required files per stage, cumulative. The UI_ONLY files apply only when the repo has UI.
 const EXPLORE_FILES = ['AGENTS.md'];
-const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
+const PRODUCT_FILES = [...EXPLORE_FILES, 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
 const LIVE_FILES = [...PRODUCT_FILES, 'docs/threat-model.md', 'docs/runbooks/'];
 export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: LIVE_FILES, scale: LIVE_FILES };
 export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
@@ -47,6 +47,14 @@ export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi
 // A repo may keep DESIGN.md below the top (web/DESIGN.md); the state records where as design_md.
 const designPath = (state) => (typeof state?.design_md === 'string' && state.design_md ? state.design_md : 'DESIGN.md');
 const asRecorded = (state) => (f) => (f === 'DESIGN.md' ? designPath(state) : f);
+
+// The code map moved out of the hidden folder, where ripgrep does not look. The old place still counts
+// until grow moves it.
+export const CODE_MAP = 'docs/code-map.md';
+export const LEGACY_CODE_MAP = '.agents/code-map.md';
+const legacyCodeMap = (has) => !has(CODE_MAP) && has(LEGACY_CODE_MAP);
+const satisfied = (has) => (f) => has(f) || (f === CODE_MAP && has(LEGACY_CODE_MAP));
+const MOVE_CODE_MAP = `${LEGACY_CODE_MAP} is the old place for the code map; move it with git mv ${LEGACY_CODE_MAP} ${CODE_MAP}`;
 
 const COPILOT_SESSIONS = () => join(homedir(), '.copilot', 'session-state');
 
@@ -245,14 +253,15 @@ export function signals(top, opts = {}) {
   if (!reasons.length) reasons.push('no signal beyond explore');
 
   const required = requiredFor(proposed, has_ui).map(asRecorded(recorded));
-  const fileMap = Object.fromEntries(required.map((f) => [f, src.has(f)]));
+  const fileMap = Object.fromEntries(required.map((f) => [f, satisfied(src.has)(f)]));
+  const code_map_legacy = legacyCodeMap(src.has);
   const behind = asOf || !src.git ? null : behindUpstream(top);
   // An unrecorded DESIGN.md one folder down, for the owner to record with state --set design_md=<path>.
   const design_md_found = has_ui && !recorded?.design_md && !src.has('DESIGN.md')
     ? files.find((f) => /^[^/]+\/DESIGN\.md$/.test(f)) ?? null
     : null;
 
-  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
   if (asOf) out.as_of = asOf.sha;
   return out;
 }
@@ -347,7 +356,7 @@ const CHECK_SH = '.agents/check.sh';
 const SECURITY_LINE = 'The reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed.';
 const UI_LINE = 'After any UI change, run check-screens before reporting done.';
 
-// Files init-files writes per stage, as [repo path, template]. DESIGN.md and .agents/code-map.md belong to providers.
+// Files init-files writes per stage, as [repo path, template]. DESIGN.md and docs/code-map.md belong to providers.
 const PRODUCT_TEMPLATES = [
   ['PRODUCT.md', 'PRODUCT.md'], ['ARCHITECTURE.md', 'ARCHITECTURE.md'], ['GLOSSARY.md', 'GLOSSARY.md'],
   ['docs/decisions/index.md', 'decisions-index.md'], ['docs/decisions/0000-template.md', 'decision.md'],
@@ -363,7 +372,7 @@ const LINKS = [
   ['README.md', 'what this is and how to run it'],
   ['PRODUCT.md', 'who it is for and what it must do'],
   ['ARCHITECTURE.md', 'how the code is laid out'],
-  ['.agents/code-map.md', 'the module by module map'],
+  [CODE_MAP, 'the module by module map'],
   ['GLOSSARY.md', 'the words this project uses'],
   ['DESIGN.md', 'the visual design system'],
   ['docs/ui/screens.md', 'every screen, its approved mockup and its last check'],
@@ -488,17 +497,21 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f));
   const written = new Set(docs.filter(([f]) => !exists(f)).map(([f]) => f));
   const willExist = (f) => !skip.includes(f) && (written.has(f) || exists(f));
+  const legacyMap = legacyCodeMap(exists);
+  // AGENTS.md links the code map where it is today; grow moves it and the link together.
+  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : asRecorded(current)(f));
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
+  if (legacyMap) lines.push(`warn ${MOVE_CODE_MAP}`);
   if (current && current.stage !== stage) lines.push(`warn --stage ${stage} differs from the recorded stage ${current.stage}; the state keeps ${current.stage}, so set it with state --set stage=${stage} first`);
   reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
-    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, asRecorded(current)));
+    lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, rename));
   } else if (agentsExisted) lines.push('kept AGENTS.md (exists, unmigrated)');
   else {
-    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi, asRecorded(current))]);
+    writes.push(['AGENTS.md', agentsMd(stage, name, check.command, willExist, hasUi, rename)]);
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
@@ -730,7 +743,7 @@ export function hookLine(top) {
   if (!Object.hasOwn(REQUIRED, s.stage)) throw new FoundryError(`unknown stage ${s.stage}`, 1);
   const queue = s.queue ?? [];
   if (!Array.isArray(queue)) throw new FoundryError('queue is not a list', 1);
-  const missing = requiredFor(s.stage, s.has_ui === true).map(asRecorded(s)).filter((f) => !present(top, f));
+  const missing = requiredFor(s.stage, s.has_ui === true).map(asRecorded(s)).filter((f) => !satisfied((x) => present(top, x))(f));
   const open = queue.filter((q) => q && q.done === false).length;
   if (!missing.length && !open) return null;
   const names = missing.length ? missing.slice(0, 2).join(', ') : 'none';

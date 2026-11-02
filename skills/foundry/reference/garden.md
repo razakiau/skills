@@ -12,7 +12,7 @@ Done: you have read every commit in the range, or you said it holds none.
 
 ### 2. Look for drift
 
-Read AGENTS.md, CONSTRAINTS.md and `.agents/code-map.md` when they exist. In the range, look for:
+Read AGENTS.md, CONSTRAINTS.md and `docs/code-map.md` (or `.agents/code-map.md` in a repo not yet moved) when they exist. In the range, look for:
 
 - a workaround copied to a new place;
 - a comment that excuses a problem instead of fixing it, such as "hack" or "temporary";

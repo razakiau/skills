@@ -73,7 +73,7 @@ The script decides the size of the change. A **Small** change (one code file, no
 
 ### The code map
 
-`.agents/code-map.md`, committed at the repository root, tells the agent where shared concepts live and which code to copy:
+`docs/code-map.md`, committed in the repository (the older `.agents/code-map.md` still works), tells the agent where shared concepts live and which code to copy:
 
 ```markdown
 | Concept | Home | Path | Precedent |
@@ -89,7 +89,7 @@ The script decides the size of the change. A **Small** change (one code file, no
 
 ### The end-of-turn hook
 
-With the plugin installed, a hook (`hooks/hooks.json`) audits the agent's own changes in any repository that has a code map: the editor's folder or a linked `git worktree` of it. It acts at the end of a turn, or when the agent calls `ask_user` mid-turn, and only if the agent changed non-test code during that turn. It blocks once per distinct diff, prints the audit and asks the agent to answer every flag. Edits you make yourself between turns pass silently. In a repository without `.agents/code-map.md`, the hook does nothing.
+With the plugin installed, a hook (`hooks/hooks.json`) audits the agent's own changes in any repository that has a code map: the editor's folder or a linked `git worktree` of it. It acts at the end of a turn, or when the agent calls `ask_user` mid-turn, and only if the agent changed non-test code during that turn. It blocks once per distinct diff, prints the audit and asks the agent to answer every flag. Edits you make yourself between turns pass silently. In a repository without a code map, the hook does nothing.
 
 ### Requirements
 

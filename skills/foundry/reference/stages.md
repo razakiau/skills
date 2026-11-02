@@ -26,7 +26,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
@@ -57,7 +57,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
@@ -85,7 +85,7 @@ Required files:
 - `docs/decisions/index.md`
 - `GLOSSARY.md`
 - `ARCHITECTURE.md`
-- `.agents/code-map.md`
+- `docs/code-map.md`
 - `DESIGN.md` (only with UI)
 - `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`

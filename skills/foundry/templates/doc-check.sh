@@ -1,5 +1,5 @@
 #!/bin/sh
-# foundry doc-check v1.2.0
+# foundry doc-check v1.3.0
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
 # budget, stage-required files and the precedence sentence.
@@ -198,13 +198,14 @@ check_agents_md() {
 }
 
 # Must match REQUIRED in foundry.mjs, in the same order. DESIGN.md stands for
-# the recorded design_md path.
+# the recorded design_md path. The code map still counts at its old place,
+# .agents/code-map.md, with a WARN to move it.
 check_required() {
   if [ -n "$state_unread" ]; then
     finding WARN state ".agents/foundry.json has no stage on its own line; write it 2-space, one key per line"
   fi
   explore='AGENTS.md'
-  product="$explore PRODUCT.md docs/decisions/index.md GLOSSARY.md ARCHITECTURE.md .agents/code-map.md DESIGN.md docs/ui/screens.md CONSTRAINTS.md"
+  product="$explore PRODUCT.md docs/decisions/index.md GLOSSARY.md ARCHITECTURE.md docs/code-map.md DESIGN.md docs/ui/screens.md CONSTRAINTS.md"
   live="$product docs/threat-model.md docs/runbooks/"
   case $stage in
     explore) required=$explore ;;
@@ -218,6 +219,10 @@ check_required() {
   for f in $required; do
     case $f in DESIGN.md | docs/ui/screens.md) if [ "$has_ui" != true ]; then continue; fi ;; esac
     if [ "$f" = DESIGN.md ]; then f=$design_md; fi
+    if [ "$f" = docs/code-map.md ] && [ ! -f "$root/$f" ] && [ -f "$root/.agents/code-map.md" ]; then
+      finding WARN required ".agents/code-map.md is the old place for the code map; move it with git mv .agents/code-map.md docs/code-map.md"
+      continue
+    fi
     case $f in
       */) if [ ! -d "$root/$f" ]; then finding FAIL required "$f"; fi ;;
       *) if [ ! -f "$root/$f" ]; then finding FAIL required "$f"; fi ;;

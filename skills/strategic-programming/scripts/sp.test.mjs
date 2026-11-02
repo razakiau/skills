@@ -679,7 +679,7 @@ const CODE_MAP = [
 ].join('\n');
 
 test('a new file in a shared package outside the map is flagged', () => {
-  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { 'docs/code-map.md': CODE_MAP });
   run(repo, ['start']);
   write(repo, 'packages/utils/src/other/x.ts', lines(2));
   write(repo, 'packages/utils/src/lib/js/y.ts', lines(2));
@@ -687,6 +687,20 @@ test('a new file in a shared package outside the map is flagged', () => {
   const a = audit(repo);
   assert.deepEqual(a.unlistedHome, ['packages/utils/src/other/x.ts']);
   assert.ok(run(repo, ['audit']).stdout.includes('\nunlisted home: packages/utils/src/other/x.ts\n'));
+});
+
+test('the old .agents/code-map.md still works, and docs/code-map.md wins when both exist', () => {
+  const legacy = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  run(legacy, ['start']);
+  write(legacy, 'packages/utils/src/other/x.ts', lines(2));
+  assert.deepEqual(audit(legacy).unlistedHome, ['packages/utils/src/other/x.ts']);
+  const both = makeWorkspace(['packages/*', 'apps/*'], {
+    'docs/code-map.md': '| Concept | Path |\n|---|---|\n| all | packages/utils |\n',
+    '.agents/code-map.md': CODE_MAP,
+  });
+  run(both, ['start']);
+  write(both, 'packages/utils/src/other/x.ts', lines(2));
+  assert.deepEqual(audit(both).unlistedHome, []);
 });
 
 test('no code map means unlisted home is not measured', () => {
@@ -744,7 +758,7 @@ function makeLibWorkspace(map) {
     'packages/lib/index.ts': lines(3),
     'apps/a/package.json': pkg('a', { dependencies: { utils: '*', solo: '*', lib: '*' } }),
     'apps/b/package.json': pkg('b', { devDependencies: { utils: '*', lib: '*' } }),
-    '.agents/code-map.md': map,
+    'docs/code-map.md': map,
   });
 }
 
@@ -774,7 +788,7 @@ test('a fenced example table is not the code map', () => {
     '~~~', '',
     '| Concept | path |', '| :- | -: |', '| dates | packages/utils/src/lib |', '',
   ].join('\n');
-  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': map });
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { 'docs/code-map.md': map });
   run(repo, ['start']);
   write(repo, 'packages/utils/src/other/x.ts', lines(2));
   write(repo, 'packages/utils/src/lib/y.ts', lines(2));
@@ -783,7 +797,7 @@ test('a fenced example table is not the code map', () => {
 
 test('a code map without a Path column says so', () => {
   const repo = makeWorkspace(['packages/*', 'apps/*'], {
-    '.agents/code-map.md': '| Concept | Home |\n|---|---|\n| dates | utils |\n',
+    'docs/code-map.md': '| Concept | Home |\n|---|---|\n| dates | utils |\n',
   });
   run(repo, ['start']);
   write(repo, 'packages/utils/src/other/x.ts', lines(2));
@@ -795,7 +809,7 @@ test('a code map without a Path column says so', () => {
 
 test('a graph it cannot read leaves unlisted home not measured', () => {
   // 42 in the workspace list makes packageGraph throw (42.startsWith).
-  const repo = makeWorkspace([42, 'packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  const repo = makeWorkspace([42, 'packages/*', 'apps/*'], { 'docs/code-map.md': CODE_MAP });
   run(repo, ['start']);
   write(repo, 'packages/utils/src/other/x.ts', lines(2));
   assert.equal(audit(repo).unlistedHome, null);
@@ -805,7 +819,7 @@ test('a graph it cannot read leaves unlisted home not measured', () => {
 });
 
 test('a modified file or a new test file in a shared package outside the map is not flagged', () => {
-  const repo = makeWorkspace(['packages/*', 'apps/*'], { '.agents/code-map.md': CODE_MAP });
+  const repo = makeWorkspace(['packages/*', 'apps/*'], { 'docs/code-map.md': CODE_MAP });
   run(repo, ['start']);
   write(repo, 'packages/utils/index.ts', lines(4));
   write(repo, 'packages/utils/src/other/x.test.ts', lines(2));
@@ -824,7 +838,7 @@ function call(cmd, payload) {
 const hook = (payload) => call('hook', payload);
 const turn = (payload) => call('turn', payload);
 
-const MAP = { '.agents/code-map.md': '| Concept | Path |\n|---|---|\n| all | src |\n' };
+const MAP = { 'docs/code-map.md': '| Concept | Path |\n|---|---|\n| all | src |\n' };
 // A repo that opted in to the hook through a committed code map.
 const makeHookRepo = (files = { 'a.ts': lines(5) }) => makeRepo({ ...files, ...MAP });
 const stateOf = (repo) => join(repo, '.git', 'strategic-programming', createHash('sha1').update(repo).digest('hex').slice(0, 12));
@@ -852,6 +866,12 @@ test('blocks once when code changed, then stays silent on the same diff', () => 
   assert.deepEqual(hook({ cwd: repo }), {});
   write(repo, 'a.test.ts', lines(2, 't'));
   assert.equal(hook({ cwd: repo }).decision, 'block', 'a test edit beside the code change is a new diff');
+});
+
+test('the hook still opts in through the old .agents/code-map.md', () => {
+  const repo = makeRepo({ 'a.ts': lines(5), '.agents/code-map.md': MAP['docs/code-map.md'] });
+  write(repo, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: repo, stop_hook_active: false }).decision, 'block');
 });
 
 test('silent when already continuing', () => {
@@ -1045,7 +1065,7 @@ function makeWorktreeSetup() {
   const wt = realpathSync(mkdtempSync(join(tmpdir(), 'sp-wt-')));
   rmSync(wt, { recursive: true });
   git(main, 'worktree', 'add', '-q', '-b', 'feat', wt);
-  write(wt, '.agents/code-map.md', MAP['.agents/code-map.md']);
+  write(wt, 'docs/code-map.md', MAP['docs/code-map.md']);
   return { main, wt };
 }
 

@@ -6,7 +6,7 @@
 
 ## Code map
 
-The module by module map lives in `.agents/code-map.md`. This section names only the few places a newcomer must know.
+The module by module map lives in `docs/code-map.md`. This section names only the few places a newcomer must know.
 
 <!-- One line per place: where it is and what it is for. -->
 
