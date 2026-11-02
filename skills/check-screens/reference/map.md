@@ -9,18 +9,18 @@ Read the map before you change a screen. Query it with the script instead of gre
 The first line of the file is exactly:
 
 ```text
-<!-- ui-check screen map v1 -->
+<!-- check-screens map v1 -->
 ```
 
 Every command that reads or edits the map checks it. A file without it belongs to another tool, and every command stops with:
 
 ```text
-ui-check: docs/ui/screens.md is not a ui-check screen map; set "Screen map: <path>" in AGENTS.md
+check-screens: docs/ui/screens.md is not a check-screens map; set "Screen map: <path>" in AGENTS.md
 ```
 
 When you see this, do not edit that file and do not move it. Ask the owner for a `Screen map: <path>` line in AGENTS.md, then run `init`.
 
-`init` writes the empty map from [the template](../templates/screens.md) and adds `.ui-check/` to `.gitignore`. It prints `wrote <path>`, or `kept <path> (exists)` when the map is already there, then `added .ui-check/ to .gitignore` when it had to add the line.
+`init` writes the empty map from [the template](../templates/screens.md) and adds `.check-screens/` to `.gitignore`. It prints `wrote <path>`, or `kept <path> (exists)` when the map is already there, then `added .check-screens/ to .gitignore` when it had to add the line.
 
 ## An entry
 
@@ -69,12 +69,12 @@ Run these instead of grepping:
 
 | Question | Command |
 | --- | --- |
-| Which screens are there? | `node <skill dir>/scripts/uicheck.mjs map` |
-| What does the map say about settings? Its mockup? | `node <skill dir>/scripts/uicheck.mjs map settings` |
-| Which screens use the tab bar layout? | `node <skill dir>/scripts/uicheck.mjs map --family tab-root` |
-| What are the siblings of report? | `node <skill dir>/scripts/uicheck.mjs map --sibling-of report` |
-| Which screens does my change touch? | `node <skill dir>/scripts/uicheck.mjs touched` |
-| Which entries are out of date? | `node <skill dir>/scripts/uicheck.mjs stale` |
+| Which screens are there? | `node <skill dir>/scripts/check-screens.mjs map` |
+| What does the map say about settings? Its mockup? | `node <skill dir>/scripts/check-screens.mjs map settings` |
+| Which screens use the tab bar layout? | `node <skill dir>/scripts/check-screens.mjs map --family tab-root` |
+| What are the siblings of report? | `node <skill dir>/scripts/check-screens.mjs map --sibling-of report` |
+| Which screens does my change touch? | `node <skill dir>/scripts/check-screens.mjs touched` |
+| Which entries are out of date? | `node <skill dir>/scripts/check-screens.mjs stale` |
 
 Give at most one of `<screen>`, `--family` and `--sibling-of`.
 
@@ -93,12 +93,12 @@ With `--json`, each form prints `{"screens": [...]}` instead, where each element
 
 `line` is the 0-based line number of the entry's heading. For `map --json <screen>`, `screens` holds that one entry. For `map --json --sibling-of <screen>`, it holds the entries of the siblings that exist in the map; a sibling with no entry is left out.
 
-An unknown screen exits 1 with `ui-check: unknown screen <name>`. A missing map exits 1 with `ui-check: no screen map at <path>; run init`.
+An unknown screen exits 1 with `check-screens: unknown screen <name>`. A missing map exits 1 with `check-screens: no screen map at <path>; run init`.
 
 ## Staleness
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs stale --routes routes.json
+node <skill dir>/scripts/check-screens.mjs stale --routes routes.json
 ```
 
 `stale` reads the map and edits nothing. It prints:
@@ -133,7 +133,7 @@ Dynamic segments (`/report/:id`, `/report/[id]`) are kept as written. Write the 
 
 ## Captures
 
-Working captures live in `.ui-check/captures/`, which `init` gitignores. Approved captures live in `docs/ui/approved/` and are committed.
+Working captures live in `.check-screens/captures/`, which `init` gitignores. Approved captures live in `docs/ui/approved/` and are committed.
 
 - `record <screen>` reads only files named `<slug>-<width>-<theme>[-<state>].png` in the capture folder, where `<width>` is digits and `<theme>` is `light` or `dark`. Other files are ignored. It records every matching file there, so clear older captures before a run ([loop.md, step 2](loop.md#2-capture)).
 - `record` needs a `file:` line, and refuses an entry whose files are missing or outside the repo top (exit 1).

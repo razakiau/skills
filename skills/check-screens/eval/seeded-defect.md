@@ -20,11 +20,11 @@ Both are visible in a capture and contradict `tokens.css`, the design source. Th
 
 ## Prepare the inputs
 
-You need Node.js 18 or later and Playwright. Set `UICHECK_PLAYWRIGHT_FROM` to a folder whose `node_modules` has `playwright`. Run from the repo top:
+You need Node.js 18 or later and Playwright. Set `CHECK_SCREENS_PLAYWRIGHT_FROM` to a folder whose `node_modules` has `playwright`. Run from the repo top:
 
 ```sh
-S=skills/ui-check/scripts/uicheck.mjs
-D=skills/ui-check/scripts/fixtures/demo
+S=skills/check-screens/scripts/check-screens.mjs
+D=skills/check-screens/scripts/fixtures/demo
 E=<an empty folder outside the repo, or a gitignored one>
 for arm in clean defect; do
   page=home.html; [ "$arm" = defect ] && page=home-defect.html
@@ -101,6 +101,8 @@ When a run fails, change reviewer.md, rerun all 6 runs, and add the new runs to 
 | 4 | 2026-11-02 | claude-opus-5-5 | 944dc2a | clean | ship | none |
 | 5 | 2026-11-02 | claude-opus-5-5 | 944dc2a | clean | ship | none |
 | 6 | 2026-11-02 | claude-opus-5-5 | 944dc2a | defect | fix | tab bar background, card gap |
+
+Recorded before the skill was renamed from ui-check; the reviewer brief was the same text.
 
 The six runs were blind: each reviewer got a folder named `r1` to `r6`, with the arms shuffled at random. Defect arm: both defects named in 3 of 3. Clean arm: `ship` in 3 of 3. Every defect run measured the gap as about 14 px against 16 px from card positions, and read the tan as off-token from `tokens.css`. No reviewer reported an item the fixtures did not plant.
 

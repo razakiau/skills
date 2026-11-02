@@ -2,7 +2,7 @@
 
 Run it after any change that touches a screen, before you report the change as done. The examples use a demo app with three screens: `home`, `report` and `settings`.
 
-Run every command from the repo top, as `node <skill dir>/scripts/uicheck.mjs <command>`. There is no `uicheck` binary.
+Run every command from the repo top, as `node <skill dir>/scripts/check-screens.mjs <command>`. There is no `check-screens` binary.
 
 ## Sizes
 
@@ -19,7 +19,7 @@ For a style tweak: run step 2 with `--widths 360 --themes light`, compare the ca
 ## 1. Find the screens
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs touched
+node <skill dir>/scripts/check-screens.mjs touched
 ```
 
 It compares the work tree with `HEAD` and counts untracked files too. On a branch, pass the point where it left main: `touched $(git merge-base main HEAD)`. A plain `touched main` also lists the files main changed since then. It prints one line per hit:
@@ -40,8 +40,8 @@ Every screen listed is touched. A touched screen with no entry gets one now: add
 For a new screen or a shared component, add 1 sibling for each touched screen:
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs map --sibling-of report
-node <skill dir>/scripts/uicheck.mjs map --family tab-root
+node <skill dir>/scripts/check-screens.mjs map --sibling-of report
+node <skill dir>/scripts/check-screens.mjs map --family tab-root
 ```
 
 Done: you have a list of screens to capture, and each one has an entry in the map.
@@ -51,8 +51,8 @@ Done: you have a list of screens to capture, and each one has an entry in the ma
 Start the app's dev server and keep it running. Use real or seeded data, not lorem ipsum. Clear the older captures of each screen you capture, siblings included, so the review and step 6 see only this run, then capture. The pattern uses the screen's slug; run the `find` once per screen:
 
 ```sh
-mkdir -p .ui-check/captures && find .ui-check/captures -name 'report-[0-9]*.png' -delete
-node <skill dir>/scripts/uicheck.mjs capture --url http://localhost:5173/report --screen report
+mkdir -p .check-screens/captures && find .check-screens/captures -name 'report-[0-9]*.png' -delete
+node <skill dir>/scripts/check-screens.mjs capture --url http://localhost:5173/report --screen report
 ```
 
 The `[0-9]` in the pattern spares the captures of another screen whose name starts the same way, such as `report-archive`.
@@ -61,17 +61,17 @@ The `[0-9]` in the pattern spares the captures of another screen whose name star
 - When the screen's mockup has another phone width, add it: `--widths 360,390,1440`.
 - When the app has one theme only, pass `--themes light`.
 - For each state the change affects (empty, loading, error, long content), bring the app into that state at a URL and capture it with `--state <s>`, for example `--state empty`.
-- Files go to `.ui-check/captures/<screen>-<width>-<theme>[-<state>].png`, with the screen and state as slugs (`Settings / Billing` becomes `settings-billing`). Each file written prints `wrote <file>`.
+- Files go to `.check-screens/captures/<screen>-<width>-<theme>[-<state>].png`, with the screen and state as slugs (`Settings / Billing` becomes `settings-billing`). Each file written prints `wrote <file>`.
 
 When `capture` fails:
 
 | Output | Meaning | Do |
 | --- | --- | --- |
-| `ui-check: could not reach <url>` (exit 1) | Nothing answered at the URL. No PNG was written. | Start the dev server or fix the URL, then capture again. |
-| `ui-check: could not load <url>: <reason>` (exit 1) | The page did not finish loading. | Fix the page or the URL, then capture again. |
-| `warn <file>: error overlay` or `warn <file>: empty page`, then `ui-check: 1 capture not valid; fix the page and capture again` (exit 1) | The page showed a framework error overlay, or no text. That file was not written, and an older file of that name was deleted. | Fix the page, then capture again. |
-| `ui-check: no playwright in <dir>; capture with the browser MCP instead (reference/providers.md)` (exit 3) | The app has no `playwright` or `@playwright/test` package. | Capture with a browser MCP ([providers.md](providers.md#capture-with-a-browser-mcp)). |
-| `ui-check: playwright in <dir> could not launch chromium: <reason>` (exit 3) | Playwright is there, its browser is not. | Run `npx playwright install chromium` in the app if the owner allows it, or capture with a browser MCP. |
+| `check-screens: could not reach <url>` (exit 1) | Nothing answered at the URL. No PNG was written. | Start the dev server or fix the URL, then capture again. |
+| `check-screens: could not load <url>: <reason>` (exit 1) | The page did not finish loading. | Fix the page or the URL, then capture again. |
+| `warn <file>: error overlay` or `warn <file>: empty page`, then `check-screens: 1 capture not valid; fix the page and capture again` (exit 1) | The page showed a framework error overlay, or no text. That file was not written, and an older file of that name was deleted. | Fix the page, then capture again. |
+| `check-screens: no playwright in <dir>; capture with the browser MCP instead (reference/providers.md)` (exit 3) | The app has no `playwright` or `@playwright/test` package. | Capture with a browser MCP ([providers.md](providers.md#capture-with-a-browser-mcp)). |
+| `check-screens: playwright in <dir> could not launch chromium: <reason>` (exit 3) | Playwright is there, its browser is not. | Run `npx playwright install chromium` in the app if the owner allows it, or capture with a browser MCP. |
 
 With no browser of any kind, stop here and say "not checked" in the report ([providers.md](providers.md#no-browser)).
 
@@ -82,7 +82,7 @@ Done: every screen on the list has a valid PNG for each width, theme and state, 
 For each captured screen, read its entry:
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs map report
+node <skill dir>/scripts/check-screens.mjs map report
 ```
 
 This prints the entry's lines as written in the map. From it, take:
@@ -131,7 +131,7 @@ Report to the owner:
 Then record each screen the change touched, once its files stop changing. Do not record the siblings you captured only to compare:
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs record report
+node <skill dir>/scripts/check-screens.mjs record report
 ```
 
 It prints `recorded report: 1440-dark 1440-light 360-dark 360-light` and writes `last-capture:` in the map. Commit the map with the change.
@@ -139,8 +139,8 @@ It prints `recorded report: 1440-dark 1440-light 360-dark 360-light` and writes 
 Only when the owner says in words that a capture or a mockup is approved:
 
 ```sh
-node <skill dir>/scripts/uicheck.mjs approve report --by <owner name> --captures
-node <skill dir>/scripts/uicheck.mjs approve report --by <owner name> --mockup docs/ui/mockups/report-360-light.png
+node <skill dir>/scripts/check-screens.mjs approve report --by <owner name> --captures
+node <skill dir>/scripts/check-screens.mjs approve report --by <owner name> --mockup docs/ui/mockups/report-360-light.png
 ```
 
 `--captures` copies the screen's captures to `docs/ui/approved/` and prints `copied <path>` for each one. Commit them. `--mockup` takes a path relative to the repo top, and the file must exist; it prints `approved mockup <path> for <screen>`.

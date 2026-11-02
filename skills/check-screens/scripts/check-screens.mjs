@@ -6,26 +6,26 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // The first line of every screen map. A file without it belongs to someone else.
-export const MARKER = '<!-- ui-check screen map v1 -->';
+export const MARKER = '<!-- check-screens map v1 -->';
 const DEFAULT_MAP = 'docs/ui/screens.md';
-const IGNORE_LINE = '.ui-check/';
+const IGNORE_LINE = '.check-screens/';
 const TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'screens.md');
 
 // One line per command. Later commands add their own line here.
 export const USAGE = [
   'usage:',
-  '  node uicheck.mjs map [--json] [<screen> | --family <family> | --sibling-of <screen>]',
-  '  node uicheck.mjs init',
-  '  node uicheck.mjs capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .ui-check/captures]',
-  '  node uicheck.mjs touched [<base>]',
-  '  node uicheck.mjs record <screen> [--out .ui-check/captures]',
-  '  node uicheck.mjs approve <screen> --by <name> (--mockup <path> | --captures) [--out .ui-check/captures]',
-  '  node uicheck.mjs stale [--routes <file|->]',
+  '  node check-screens.mjs map [--json] [<screen> | --family <family> | --sibling-of <screen>]',
+  '  node check-screens.mjs init',
+  '  node check-screens.mjs capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .check-screens/captures]',
+  '  node check-screens.mjs touched [<base>]',
+  '  node check-screens.mjs record <screen> [--out .check-screens/captures]',
+  '  node check-screens.mjs approve <screen> --by <name> (--mockup <path> | --captures) [--out .check-screens/captures]',
+  '  node check-screens.mjs stale [--routes <file|->]',
   '',
 ].join('\n');
 
-// An error the user caused: printed as `ui-check: <message>` with its own exit code.
-export class UiCheckError extends Error {
+// An error the user caused: printed as `check-screens: <message>` with its own exit code.
+export class CheckScreensError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
@@ -102,14 +102,14 @@ export function parseMap(text) {
 function find(screens, name) {
   const want = slug(name);
   const hits = screens.filter((s) => s.name === name || s.slug === want);
-  if (!hits.length) throw new UiCheckError(`unknown screen ${name}`, 1);
-  if (hits.length > 1) throw new UiCheckError(`ambiguous screen ${name}: ${hits.length} entries`, 1);
+  if (!hits.length) throw new CheckScreensError(`unknown screen ${name}`, 1);
+  if (hits.length > 1) throw new CheckScreensError(`ambiguous screen ${name}: ${hits.length} entries`, 1);
   return hits[0];
 }
 
 // Sets one field of one entry and leaves every other byte of the map as it was.
 export function setField(text, screen, key, value) {
-  if (/[\r\n]/.test(String(value))) throw new UiCheckError('value must be one line', 2);
+  if (/[\r\n]/.test(String(value))) throw new CheckScreensError('value must be one line', 2);
   const { eol, lines, screens } = scan(text);
   const entry = find(screens, screen);
   const line = `${key}: ${value}`;
@@ -132,7 +132,7 @@ export function mapPath(top) {
       const path = resolve(top, m[1]);
       const rel = relative(top, path);
       if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
-        throw new UiCheckError(`screen map path ${m[1]} is outside the repo`, 1);
+        throw new CheckScreensError(`screen map path ${m[1]} is outside the repo`, 1);
       }
       return path;
     }
@@ -144,18 +144,18 @@ const BOM = '\uFEFF';
 const stripBom = (text) => (text.startsWith(BOM) ? text.slice(1) : text);
 const isOurs = (text) => stripBom(text).split(/\r?\n/, 1)[0] === MARKER;
 const mixedEol = (text) => text.includes('\r\n') && /(^|[^\r])\n/.test(text);
-const notOurs = (top, path) => new UiCheckError(
-  `${relative(top, path)} is not a ui-check screen map; set "Screen map: <path>" in AGENTS.md`, 1);
+const notOurs = (top, path) => new CheckScreensError(
+  `${relative(top, path)} is not a check-screens map; set "Screen map: <path>" in AGENTS.md`, 1);
 
 // The map file, refused when it is missing, belongs to another tool or mixes line endings.
 // `text` has any leading BOM removed; `bom` holds it so a writer can put it back.
 export function readMap(top) {
   const path = mapPath(top);
-  if (!existsSync(path)) throw new UiCheckError(`no screen map at ${relative(top, path)}; run init`, 1);
+  if (!existsSync(path)) throw new CheckScreensError(`no screen map at ${relative(top, path)}; run init`, 1);
   const raw = readFileSync(path, 'utf8');
   const text = stripBom(raw);
   if (!isOurs(text)) throw notOurs(top, path);
-  if (mixedEol(text)) throw new UiCheckError(`${relative(top, path)} mixes CRLF and LF line endings; normalise it first`, 1);
+  if (mixedEol(text)) throw new CheckScreensError(`${relative(top, path)} mixes CRLF and LF line endings; normalise it first`, 1);
   return { path, text, bom: raw.slice(0, raw.length - text.length) };
 }
 
@@ -166,9 +166,9 @@ function parseArgs(args, { flags = [], options = [], positionals = 0 }) {
     const a = args[i];
     if (flags.includes(a)) out.flags[a] = true;
     else if (options.includes(a)) {
-      if (i + 1 >= args.length) throw new UiCheckError(`${a} needs a value`, 2);
+      if (i + 1 >= args.length) throw new CheckScreensError(`${a} needs a value`, 2);
       out.options[a] = args[++i];
-    } else if (a.startsWith('--') || out.positionals.length >= positionals) throw new UiCheckError(`unknown argument ${a}`, 2);
+    } else if (a.startsWith('--') || out.positionals.length >= positionals) throw new CheckScreensError(`unknown argument ${a}`, 2);
     else out.positionals.push(a);
   }
   return out;
@@ -181,7 +181,7 @@ function mapCmd(args) {
   const family = options['--family'];
   const siblingOf = options['--sibling-of'];
   if ([positionals.length > 0, family !== undefined, siblingOf !== undefined].filter(Boolean).length > 1) {
-    throw new UiCheckError('give one of <screen>, --family, --sibling-of', 2);
+    throw new CheckScreensError('give one of <screen>, --family, --sibling-of', 2);
   }
   const { text } = readMap(repoTop());
   const { lines, screens: scanned } = scan(text);
@@ -223,7 +223,7 @@ function initCmd(args) {
   const ignore = join(top, '.gitignore');
   const current = existsSync(ignore) ? readFileSync(ignore, 'utf8') : '';
   const eol = current.includes('\r\n') ? '\r\n' : '\n';
-  const known = current.split(/\r?\n/).some((l) => ['.ui-check', '.ui-check/', '/.ui-check', '/.ui-check/'].includes(l.trim()));
+  const known = current.split(/\r?\n/).some((l) => ['.check-screens', '.check-screens/', '/.check-screens', '/.check-screens/'].includes(l.trim()));
   if (!known) {
     const sep = current && !current.endsWith('\n') ? eol : '';
     writeFileSync(ignore, `${current}${sep}${IGNORE_LINE}${eol}`);
@@ -232,9 +232,9 @@ function initCmd(args) {
 }
 
 // The Playwright entry point the target app has installed, or null.
-// UICHECK_PLAYWRIGHT_FROM overrides fromDir.
+// CHECK_SCREENS_PLAYWRIGHT_FROM overrides fromDir.
 export function findPlaywright(fromDir) {
-  const dir = process.env.UICHECK_PLAYWRIGHT_FROM ?? fromDir;
+  const dir = process.env.CHECK_SCREENS_PLAYWRIGHT_FROM ?? fromDir;
   const req = createRequire(join(resolve(dir), 'package.json'));
   for (const name of ['playwright', '@playwright/test']) {
     try { return req.resolve(name); } catch { /* try the next one */ }
@@ -261,32 +261,32 @@ async function captureCmd(args) {
   const { options } = parseArgs(args, { options: ['--url', '--screen', '--widths', '--themes', '--state', '--out'] });
   const url = options['--url'];
   const screen = options['--screen'];
-  if (!url || !screen) throw new UiCheckError('capture needs --url and --screen', 2);
-  if (!slug(screen)) throw new UiCheckError(`screen name ${screen} has no letters or digits`, 2);
+  if (!url || !screen) throw new CheckScreensError('capture needs --url and --screen', 2);
+  if (!slug(screen)) throw new CheckScreensError(`screen name ${screen} has no letters or digits`, 2);
   const widths = list(options['--widths'] ?? '360,1440').map((w) => {
-    if (!/^[1-9][0-9]*$/.test(w)) throw new UiCheckError(`bad width ${w}`, 2);
+    if (!/^[1-9][0-9]*$/.test(w)) throw new CheckScreensError(`bad width ${w}`, 2);
     return Number(w);
   });
   const themes = list(options['--themes'] ?? 'light,dark');
-  for (const t of themes) if (!THEMES.includes(t)) throw new UiCheckError(`bad theme ${t}; use light or dark`, 2);
-  if (!widths.length || !themes.length) throw new UiCheckError('give at least one width and one theme', 2);
+  for (const t of themes) if (!THEMES.includes(t)) throw new CheckScreensError(`bad theme ${t}; use light or dark`, 2);
+  if (!widths.length || !themes.length) throw new CheckScreensError('give at least one width and one theme', 2);
   const state = options['--state'];
 
   const top = repoTop();
-  const outOpt = options['--out'] ?? '.ui-check/captures';
+  const outOpt = options['--out'] ?? '.check-screens/captures';
   const out = isAbsolute(outOpt) ? outOpt : join(top, outOpt);
   const shown = (path) => (relative(top, path).startsWith('..') ? path : relative(top, path));
 
-  const from = process.env.UICHECK_PLAYWRIGHT_FROM ?? top;
+  const from = process.env.CHECK_SCREENS_PLAYWRIGHT_FROM ?? top;
   const resolved = findPlaywright(top);
-  if (!resolved) throw new UiCheckError(`no playwright in ${from}; capture with the browser MCP instead (reference/providers.md)`, 3);
+  if (!resolved) throw new CheckScreensError(`no playwright in ${from}; capture with the browser MCP instead (reference/providers.md)`, 3);
   const pw = await import(pathToFileURL(resolved).href);
   const chromium = pw.chromium ?? pw.default?.chromium;
   let browser;
   try {
     browser = await chromium.launch();
   } catch (err) {
-    throw new UiCheckError(`playwright in ${from} could not launch chromium: ${String(err.message).split('\n')[0]}`, 3);
+    throw new CheckScreensError(`playwright in ${from} could not launch chromium: ${String(err.message).split('\n')[0]}`, 3);
   }
 
   let bad = 0;
@@ -304,8 +304,8 @@ async function captureCmd(args) {
           try {
             await page.goto(url, { waitUntil: 'networkidle' });
           } catch (err) {
-            if (UNREACHABLE.test(String(err.message))) throw new UiCheckError(`could not reach ${url}`, 1);
-            throw new UiCheckError(`could not load ${url}: ${String(err.message).split('\n')[0]}`, 1);
+            if (UNREACHABLE.test(String(err.message))) throw new CheckScreensError(`could not reach ${url}`, 1);
+            throw new CheckScreensError(`could not load ${url}: ${String(err.message).split('\n')[0]}`, 1);
           }
           await page.waitForTimeout(SETTLE_MS);
           const { empty, overlay } = await page.evaluate((selectors) => ({
@@ -333,7 +333,7 @@ async function captureCmd(args) {
   } finally {
     await browser.close();
   }
-  if (bad) throw new UiCheckError(`${bad} capture${bad > 1 ? 's' : ''} not valid; fix the page and capture again`, 1);
+  if (bad) throw new CheckScreensError(`${bad} capture${bad > 1 ? 's' : ''} not valid; fix the page and capture again`, 1);
 }
 
 // Does `f`, relative to the repo top unless absolute, name a path inside it?
@@ -378,7 +378,7 @@ function touchedCmd(args) {
   try {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, stdio: 'ignore' });
   } catch {
-    throw new UiCheckError('touched needs git', 2);
+    throw new CheckScreensError('touched needs git', 2);
   }
   const top = repoTop(cwd);
   const { text } = readMap(top);
@@ -390,7 +390,7 @@ function touchedCmd(args) {
       ...gitLines(top, ['ls-files', '--others', '--exclude-standard']),
     ])].sort();
   } catch {
-    throw new UiCheckError(`git diff failed for base ${base}`, 1);
+    throw new CheckScreensError(`git diff failed for base ${base}`, 1);
   }
   const out = [];
   const owned = new Set();
@@ -413,7 +413,7 @@ function touchedCmd(args) {
 
 // The capture dir from --out, relative to the repo top unless absolute.
 function outDir(top, options) {
-  const opt = options['--out'] ?? '.ui-check/captures';
+  const opt = options['--out'] ?? '.check-screens/captures';
   return isAbsolute(opt) ? opt : join(top, opt);
 }
 
@@ -432,7 +432,7 @@ function capturesOf(dir, s) {
 // `check` runs on the parsed arguments first, so a usage error never depends on the map.
 function entryAndCaptures(cmd, args, extra, check = () => {}) {
   const parsed = parseArgs(args, { positionals: 1, options: ['--out', ...(extra.options ?? [])], flags: extra.flags ?? [] });
-  if (!parsed.positionals.length) throw new UiCheckError(`${cmd} needs a screen`, 2);
+  if (!parsed.positionals.length) throw new CheckScreensError(`${cmd} needs a screen`, 2);
   check(parsed);
   const top = repoTop();
   const map = readMap(top);
@@ -442,18 +442,18 @@ function entryAndCaptures(cmd, args, extra, check = () => {}) {
 }
 
 function noCaptures(entry, dir, shown) {
-  return new UiCheckError(`no captures for ${entry.slug} in ${shown(dir)}`, 1);
+  return new CheckScreensError(`no captures for ${entry.slug} in ${shown(dir)}`, 1);
 }
 
 function recordCmd(args) {
   const { top, map, entry, dir, shown } = entryAndCaptures('record', args, {});
   const files = capturesOf(dir, entry.slug);
   if (!files.length) throw noCaptures(entry, dir, shown);
-  if (!list(entry.fields.file).length) throw new UiCheckError(`screen ${entry.name} has no file: line; add one before record`, 1);
+  if (!list(entry.fields.file).length) throw new CheckScreensError(`screen ${entry.name} has no file: line; add one before record`, 1);
   const outside = list(entry.fields.file).filter((f) => !insideTop(top, f));
-  if (outside.length) throw new UiCheckError(`a file of ${entry.name} is outside the repo: ${outside.join(', ')}`, 1);
+  if (outside.length) throw new CheckScreensError(`a file of ${entry.name} is outside the repo: ${outside.join(', ')}`, 1);
   const hash = fileHash(top, entry.fields.file);
-  if (!hash) throw new UiCheckError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
+  if (!hash) throw new CheckScreensError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
   const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();
   writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'last-capture', `${today()} ${hash} ${variants.join(' ')}`));
   process.stdout.write(`recorded ${entry.name}: ${variants.join(' ')}\n`);
@@ -463,13 +463,13 @@ const APPROVED_DIR = 'docs/ui/approved';
 
 function approveCmd(args) {
   const { options, top, map, entry, dir, shown } = entryAndCaptures('approve', args, { options: ['--by', '--mockup'], flags: ['--captures'] }, ({ options: o, flags: f }) => {
-    if (!o['--by'] || !o['--by'].trim()) throw new UiCheckError('approve needs --by <name>; only the owner approves', 2);
-    if ((o['--mockup'] !== undefined) === Boolean(f['--captures'])) throw new UiCheckError('give one of --mockup <path> or --captures', 2);
+    if (!o['--by'] || !o['--by'].trim()) throw new CheckScreensError('approve needs --by <name>; only the owner approves', 2);
+    if ((o['--mockup'] !== undefined) === Boolean(f['--captures'])) throw new CheckScreensError('give one of --mockup <path> or --captures', 2);
   });
   const by = options['--by'];
   const mockup = options['--mockup'];
   if (mockup !== undefined) {
-    if (!existsSync(resolve(top, mockup))) throw new UiCheckError(`no file at ${mockup}`, 1);
+    if (!existsSync(resolve(top, mockup))) throw new CheckScreensError(`no file at ${mockup}`, 1);
     // setField runs before the write, so a multi-line --by fails with the map untouched.
     writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'mockup', `${mockup} (approved ${today()}, ${by.trim()})`));
     process.stdout.write(`approved mockup ${mockup} for ${entry.name}\n`);
@@ -488,8 +488,8 @@ function approveCmd(args) {
 // The route strings of a JSON array of strings or `{ path }` objects.
 function parseRoutes(raw) {
   let data;
-  try { data = JSON.parse(raw); } catch (err) { throw new UiCheckError(`routes are not JSON: ${err.message}`, 2); }
-  const bad = () => new UiCheckError('routes must be a JSON array of strings or {"path": ...} objects', 2);
+  try { data = JSON.parse(raw); } catch (err) { throw new CheckScreensError(`routes are not JSON: ${err.message}`, 2); }
+  const bad = () => new CheckScreensError('routes must be a JSON array of strings or {"path": ...} objects', 2);
   if (!Array.isArray(data)) throw bad();
   return data.map((r) => {
     if (typeof r === 'string') return r;
@@ -528,7 +528,7 @@ function staleCmd(args) {
   const from = options['--routes'];
   if (from === undefined) out.push('routes: not checked (pass --routes)');
   else {
-    if (from !== '-' && !existsSync(resolve(process.cwd(), from))) throw new UiCheckError(`no routes file at ${from}`, 2);
+    if (from !== '-' && !existsSync(resolve(process.cwd(), from))) throw new CheckScreensError(`no routes file at ${from}`, 2);
     const raw = from === '-' ? readFileSync(0, 'utf8') : readFileSync(resolve(process.cwd(), from), 'utf8');
     const mapped = new Set(screens.map((s) => s.fields.route).filter(Boolean));
     for (const r of new Set(parseRoutes(raw))) {
@@ -554,9 +554,9 @@ async function main([cmd, ...rest]) {
       process.exitCode = 2;
     }
   } catch (err) {
-    process.stderr.write(`ui-check: ${String(err.message).split('\n')[0]}\n`);
+    process.stderr.write(`check-screens: ${String(err.message).split('\n')[0]}\n`);
     if (err.code === 2) process.stderr.write(USAGE);
-    process.exitCode = err instanceof UiCheckError ? err.code : 1;
+    process.exitCode = err instanceof CheckScreensError ? err.code : 1;
   }
 }
 

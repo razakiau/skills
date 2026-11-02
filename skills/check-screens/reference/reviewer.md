@@ -2,7 +2,7 @@
 
 Pass the brief below to a fresh subagent, verbatim, with the inputs filled in. The reviewer must not be the agent that built the change. It gets the change's one-line intent and nothing else from the build thread: no plan, no diff, no notes on what was tried.
 
-The structure follows the finish reviewer of [impeccable](https://github.com/pbakaus/impeccable) (Apache-2.0): disposition first, checks in a fixed order, edit nothing. The checks and wording here are ui-check's own and apply to any screen in any app.
+The structure follows the finish reviewer of [impeccable](https://github.com/pbakaus/impeccable) (Apache-2.0): disposition first, checks in a fixed order, edit nothing. The checks and wording here are check-screens's own and apply to any screen in any app.
 
 ---
 

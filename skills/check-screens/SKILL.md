@@ -1,19 +1,19 @@
 ---
-name: ui-check
+name: check-screens
 description: Use after changing any screen, page or UI component, before saying it is done. Captures the running app at phone and desktop sizes, has a fresh reviewer compare it with the approved mockup and sibling screens, and keeps the screen map. Backend-only changes skip it.
 license: MIT
 metadata:
   version: "1.0.0"
 ---
 
-# ui-check
+# check-screens
 
 Run this after any change that touches a screen, and before you say the change is done. You look at your own result first, at phone and desktop sizes, so the owner does not have to.
 The screen map, `docs/ui/screens.md`, records each screen's route, files, siblings, approved mockup and last capture ([reference/map.md](reference/map.md)). Read it instead of grepping routes.
 
 ## Setup
 
-`<skill dir>` below is the folder holding this file. Call the script with `node`, exactly as written: `node <skill dir>/scripts/uicheck.mjs map` lists the screens in the map. The script needs Node.js 18 or later. `touched` needs git, and `capture` needs Playwright in the app; without it, use a browser MCP ([reference/providers.md](reference/providers.md)).
+`<skill dir>` below is the folder holding this file. Call the script with `node`, exactly as written: `node <skill dir>/scripts/check-screens.mjs map` lists the screens in the map. The script needs Node.js 18 or later. `touched` needs git, and `capture` needs Playwright in the app; without it, use a browser MCP ([reference/providers.md](reference/providers.md)).
 
 ## The loop
 
@@ -31,14 +31,14 @@ First pick the size of the loop from the table in [reference/loop.md](reference/
 | Command | What it does | Exits 1 when |
 | --- | --- | --- |
 | `map [--json] [<screen> \| --family <family> \| --sibling-of <screen>]` | Prints screen names, one entry, a family or the siblings of a screen | the screen is unknown |
-| `init` | Writes `docs/ui/screens.md` from [templates/screens.md](templates/screens.md) and adds `.ui-check/` to `.gitignore` | the file at that path is not a ui-check map |
-| `capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .ui-check/captures]` | Writes one PNG per width and theme; exits 3 with no Playwright | the URL fails, or a page is blank or shows an error overlay |
+| `init` | Writes `docs/ui/screens.md` from [templates/screens.md](templates/screens.md) and adds `.check-screens/` to `.gitignore` | the file at that path is not a check-screens map |
+| `capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .check-screens/captures]` | Writes one PNG per width and theme; exits 3 with no Playwright | the URL fails, or a page is blank or shows an error overlay |
 | `touched [<base>]` | Lists the screens and shared UI files changed since `<base>` (default `HEAD`) | git cannot diff against `<base>`; outside a git repo it exits 2 (`touched needs git`) |
-| `record <screen> [--out .ui-check/captures]` | Writes `last-capture:` with today, the file hash and the variants found | there are no captures, or a `file:` is missing or outside the repo |
-| `approve <screen> --by <name> (--mockup <path> \| --captures) [--out .ui-check/captures]` | Records the owner's approval; `--captures` copies to `docs/ui/approved/` | the mockup or the captures are missing |
+| `record <screen> [--out .check-screens/captures]` | Writes `last-capture:` with today, the file hash and the variants found | there are no captures, or a `file:` is missing or outside the repo |
+| `approve <screen> --by <name> (--mockup <path> \| --captures) [--out .check-screens/captures]` | Records the owner's approval; `--captures` copies to `docs/ui/approved/` | the mockup or the captures are missing |
 | `stale [--routes <file\|->]` | Reports `stale`, `gone` and `unmapped` entries; edits nothing | never for findings; a bad routes file exits 2 |
 
-Every command exits 0 on success and 2 on a usage error. Every command but `init` and `capture` also exits 1 when the map is missing or foreign. On any failure, the first line on stderr starts with `ui-check: `; a usage error (exit 2) then prints the usage text. A missing or unknown command prints only the usage text.
+Every command exits 0 on success and 2 on a usage error. Every command but `init` and `capture` also exits 1 when the map is missing or foreign. On any failure, the first line on stderr starts with `check-screens: `; a usage error (exit 2) then prints the usage text. A missing or unknown command prints only the usage text.
 
 ## Rules
 

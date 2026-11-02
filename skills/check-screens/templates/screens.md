@@ -1,4 +1,4 @@
-<!-- ui-check screen map v1 -->
+<!-- check-screens map v1 -->
 
 # Screen map
 
