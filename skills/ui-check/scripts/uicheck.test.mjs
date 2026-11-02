@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { slug, parseMap, setField, mapPath, readMap, MARKER, USAGE, UiCheckError, findPlaywright, captureName } from './uicheck.mjs';
+import { slug, parseMap, setField, mapPath, readMap, MARKER, USAGE, UiCheckError, findPlaywright, captureName, fileHash, today } from './uicheck.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UICHECK = join(HERE, 'uicheck.mjs');
@@ -226,7 +227,16 @@ test('map: a screens.md without the marker is refused', () => {
     assert.equal(r.code, 1, args.join(' '));
     assert.equal(r.stderr, REFUSED);
   }
-  // `record` joins this loop in Task 3, when the command exists.
+  // record and approve would edit the map; they must refuse before touching any byte.
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  write(repo, 'docs/ui/mockup.png', 'png');
+  for (const args of [['record', 'home'], ['approve', 'home', '--by', 'owner', '--captures'],
+    ['approve', 'home', '--by', 'owner', '--mockup', 'docs/ui/mockup.png'], ['stale'], ['touched']]) {
+    const r = run(repo, args);
+    assert.equal(r.code, 1, args.join(' '));
+    assert.equal(r.stderr, REFUSED, args.join(' '));
+  }
+  assert.equal(existsSync(join(repo, 'docs/ui/approved')), false);
   assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), FOREIGN);
   assert.throws(() => readMap(repo), (err) => err instanceof UiCheckError && err.code === 1);
 });
@@ -247,11 +257,12 @@ test('cli: a bad or missing command prints USAGE and exits 2', () => {
     assert.equal(r.code, 2, args.join(' '));
   }
   assert.equal(run(repo, []).stderr, USAGE);
-  for (const cmd of ['map', 'init', 'capture']) assert.match(USAGE, new RegExp(`^  node uicheck\\.mjs ${cmd}\\b`, 'm'));
+  for (const cmd of ['map', 'init', 'capture', 'touched', 'record', 'approve', 'stale']) assert.match(USAGE, new RegExp(`^  node uicheck\\.mjs ${cmd}\\b`, 'm'));
 });
 
 // Browser tests need Playwright; point UICHECK_PLAYWRIGHT_FROM at a project that has it installed.
-const noBrowser = !findPlaywright(process.env.UICHECK_PLAYWRIGHT_FROM ?? process.cwd()) && 'no playwright';
+const PW_FROM = process.env.UICHECK_PLAYWRIGHT_FROM;
+const noBrowser = !(PW_FROM && findPlaywright(PW_FROM)) && 'set UICHECK_PLAYWRIGHT_FROM to a project with playwright';
 const DEMO = join(HERE, 'fixtures', 'demo');
 const demoUrl = (page) => pathToFileURL(join(DEMO, page)).href;
 const pngWidth = (buf) => buf.readUInt32BE(16);
@@ -349,4 +360,344 @@ test('capture: an empty page is not a capture', { skip: noBrowser }, () => {
   assert.equal(r.code, 1);
   assert.match(r.stderr, /warn \S*blank-360-light\.png: empty page/);
   assert.deepEqual(pngs(join(repo, '.ui-check', 'captures')), []);
+});
+
+test('capture: only the dark theme shows an overlay', { skip: noBrowser }, () => {
+  const repo = makeRepo();
+  const r = run(repo, ['capture', '--url', demoUrl('error-dark.html'), '--screen', 'Home', '--widths', '360']);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /warn \S*home-360-dark\.png: error overlay/);
+  assert.doesNotMatch(r.stderr, /home-360-light\.png/);
+  assert.deepEqual(pngs(join(repo, '.ui-check', 'captures')), ['home-360-light.png']);
+});
+
+// Review fixes on the map layer.
+
+test('map: setField refuses a value with a line break', () => {
+  for (const value of ['a\nb', 'a\rb', 'a\r\nb']) {
+    assert.throws(() => setField(MAP, 'home', 'route', value), (err) => {
+      assert.ok(err instanceof UiCheckError);
+      assert.equal(err.code, 2);
+      assert.equal(err.message, 'value must be one line');
+      return true;
+    });
+  }
+});
+
+test('map: two entries with the same slug are ambiguous', () => {
+  const text = [MARKER, '', '## Home', 'route: /', '', '## home', 'route: /home', ''].join('\n');
+  for (const name of ['Home', 'home', 'HOME']) {
+    assert.throws(() => setField(text, name, 'route', '/x'), (err) => {
+      assert.ok(err instanceof UiCheckError);
+      assert.equal(err.code, 1);
+      assert.equal(err.message, `ambiguous screen ${name}: 2 entries`);
+      return true;
+    });
+  }
+  const repo = makeRepo({ 'docs/ui/screens.md': text });
+  const r = run(repo, ['map', 'home']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'ui-check: ambiguous screen home: 2 entries\n');
+});
+
+test('map: a leading BOM is not a foreign file, and record keeps it', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': '\uFEFF' + MAP, 'src/home.html': '<p>home</p>\n' });
+  assert.equal(readMap(repo).text, MAP);
+  const r = run(repo, ['map']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'Home\nReport\nSettings / Billing\n');
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  const rec = run(repo, ['record', 'Home']);
+  assert.equal(rec.code, 0, rec.stderr);
+  const after = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8');
+  assert.ok(after.startsWith('\uFEFF' + MARKER));
+});
+
+test('map: mixed CRLF and LF is refused', () => {
+  const text = MARKER + '\r\n\r\n## Home\nroute: /\r\n';
+  const repo = makeRepo({ 'docs/ui/screens.md': text, 'src/home.html': 'x' });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  for (const args of [['map'], ['record', 'Home']]) {
+    const r = run(repo, args);
+    assert.equal(r.code, 1, args.join(' '));
+    assert.equal(r.stderr, 'ui-check: docs/ui/screens.md mixes CRLF and LF line endings; normalise it first\n');
+  }
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), text);
+});
+
+test('map: AGENTS.md prose that mentions a screen map does not move it', () => {
+  const repo = makeRepo({ 'AGENTS.md': '# Agents\n\nKeep the screen map: up to date after each change.\n' });
+  assert.equal(mapPath(repo), join(repo, 'docs/ui/screens.md'));
+  const listed = makeRepo({ 'AGENTS.md': '# Agents\n\n- Screen map: `ui/screens.md`\n' });
+  assert.equal(mapPath(listed), join(listed, 'ui/screens.md'));
+});
+
+test('map: AGENTS.md pointing outside the repo is refused', () => {
+  for (const target of ['../elsewhere.md', '/tmp/screens.md']) {
+    const repo = makeRepo({ 'AGENTS.md': `Screen map: \`${target}\`\n` });
+    assert.throws(() => mapPath(repo), (err) => err instanceof UiCheckError && err.code === 1);
+    const r = run(repo, ['map']);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr, `ui-check: screen map path ${target} is outside the repo\n`);
+  }
+});
+
+// touched
+
+const HOME_MAP = [MARKER, '', '## home', 'route: /', 'file: src/home.tsx', ''].join('\n');
+
+test('touched: screen file changed', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': HOME_MAP, 'src/home.tsx': 'export default 1;\n' });
+  write(repo, 'src/home.tsx', 'export default 2;\n');
+  const r = run(repo, ['touched']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^screen home \(src\/home\.tsx\)$/m);
+});
+
+test('touched: shared component lists its users', () => {
+  const repo = makeRepo({
+    'docs/ui/screens.md': HOME_MAP,
+    'src/home.tsx': "import TabBar from './TabBar';\nexport default TabBar;\n",
+    'src/TabBar.tsx': 'export default 1;\n',
+  });
+  write(repo, 'src/TabBar.tsx', 'export default 2;\n');
+  const r = run(repo, ['touched']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'shared src/TabBar.tsx\n  used by home\n');
+});
+
+test('touched: untracked files count, against a base', () => {
+  const repo = makeRepo({
+    'docs/ui/screens.md': [MARKER, '', '## home', 'file: src/home.tsx', '', '## report', 'file: src/report.tsx', ''].join('\n'),
+    'src/home.tsx': "import './theme.css';\n",
+    'src/report.tsx': 'export default 1;\n',
+  });
+  write(repo, 'src/report.tsx', 'export default 2;\n');
+  execFileSync('git', ['commit', '-qam', 'report'], { cwd: repo });
+  write(repo, 'src/theme.css', 'body{}\n');
+  const r = run(repo, ['touched', 'HEAD~1']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'screen report (src/report.tsx)\nshared src/theme.css\n  used by home\n');
+});
+
+test('touched: not git exits 2', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'uicheck-nogit-')));
+  write(dir, 'docs/ui/screens.md', HOME_MAP);
+  const r = run(dir, ['touched'], undefined, { GIT_CEILING_DIRECTORIES: dirname(dir) });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /^ui-check: touched needs git$/m);
+});
+
+// record
+
+const AB_MAP = [MARKER, '', '## home', 'route: /', 'file: src/home.tsx', '', '## Settings / Billing', 'route: /settings/billing', 'file: src/b.tsx, src/a.tsx', ''].join('\n');
+
+test('fileHash: sorted files, null when one is missing', () => {
+  const repo = makeRepo({ 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  const h = fileHash(repo, 'src/b.tsx, src/a.tsx');
+  assert.match(h, /^sha256:[0-9a-f]{12}$/);
+  assert.equal(h, fileHash(repo, 'src/a.tsx,src/b.tsx'));
+  assert.equal(h, 'sha256:' + createHash('sha256').update('A\0B').digest('hex').slice(0, 12));
+  assert.equal(fileHash(repo, 'src/a.tsx, src/gone.tsx'), null);
+});
+
+test('record: writes hash and variants', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  write(repo, '.ui-check/captures/home-1440-light.png', 'png');
+  write(repo, '.ui-check/captures/report-360-light.png', 'png');
+  const r = run(repo, ['record', 'home']);
+  assert.equal(r.code, 0, r.stderr);
+  const text = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8');
+  const line = text.split('\n').find((l) => l.startsWith('last-capture:'));
+  assert.match(line, /^last-capture: \d{4}-\d{2}-\d{2} sha256:[0-9a-f]{12} 1440-light 360-light$/);
+  assert.ok(line.startsWith(`last-capture: ${today()} ${fileHash(repo, 'src/home.tsx')} `));
+  // Only that one line was added, right after the entry's last field.
+  const lines = text.split('\n');
+  assert.equal(lines[5], line);
+  assert.deepEqual([...lines.slice(0, 5), ...lines.slice(6)], AB_MAP.split('\n'));
+});
+
+test('record: a name that is not a slug, with states and a custom --out', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, 'shots/settings-billing-360-dark-empty.png', 'png');
+  write(repo, 'shots/settings-billing-360-light.png', 'png');
+  write(repo, 'shots/settings-other-360-light.png', 'png');
+  const r = run(repo, ['record', 'Settings / Billing', '--out', 'shots']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'),
+    new RegExp(`^last-capture: ${today()} ${fileHash(repo, 'src/a.tsx, src/b.tsx')} 360-dark-empty 360-light$`, 'm'));
+});
+
+test('record: no captures exits 1', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'src/home.tsx': 'x' });
+  const r = run(repo, ['record', 'home']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'ui-check: no captures for home in .ui-check/captures\n');
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
+});
+
+test('record: unknown screen exits 1, map unchanged', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'src/home.tsx': 'x' });
+  write(repo, '.ui-check/captures/nowhere-360-light.png', 'png');
+  const before = readFileSync(join(repo, 'docs/ui/screens.md'));
+  const r = run(repo, ['record', 'nowhere']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'ui-check: unknown screen nowhere\n');
+  assert.ok(readFileSync(join(repo, 'docs/ui/screens.md')).equals(before));
+});
+
+test('record: keeps CRLF and every other byte', () => {
+  const crlf = AB_MAP.replace(/\n/g, '\r\n');
+  const repo = makeRepo({ 'docs/ui/screens.md': crlf, 'src/home.tsx': 'x' });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  assert.equal(run(repo, ['record', 'home']).code, 0);
+  const after = readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8').split('\r\n');
+  assert.equal(after.length, crlf.split('\r\n').length + 1);
+  assert.match(after[5], /^last-capture: /);
+  assert.deepEqual([...after.slice(0, 5), ...after.slice(6)], crlf.split('\r\n'));
+});
+
+// approve
+
+test('approve: needs --by', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  for (const args of [['approve', 'home', '--captures'], ['approve', 'home', '--by', 'owner'],
+    ['approve', 'home', '--by', 'owner', '--captures', '--mockup', 'x.png'], ['approve', '--by', 'owner', '--captures']]) {
+    const r = run(repo, args);
+    assert.equal(r.code, 2, args.join(' '));
+  }
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
+  assert.equal(existsSync(join(repo, 'docs/ui/approved')), false);
+  // A usage error wins over a foreign map: the arguments are checked first.
+  const foreign = makeRepo({ 'docs/ui/screens.md': FOREIGN });
+  assert.equal(run(foreign, ['approve', 'home', '--captures']).code, 2);
+});
+
+test('approve: --by with a line break is a usage error', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  const r = run(repo, ['approve', 'home', '--by', 'owner\nroute: /evil', '--captures']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /^ui-check: value must be one line$/m);
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
+  assert.equal(existsSync(join(repo, 'docs/ui/approved')), false);
+});
+
+test('approve --mockup missing path exits 1', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
+  const r = run(repo, ['approve', 'home', '--by', 'owner', '--mockup', 'docs/ui/mockups/home.png']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'ui-check: no file at docs/ui/mockups/home.png\n');
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
+});
+
+test('approve --mockup records the path and the approver', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP, 'docs/ui/mockups/home.png': 'png' });
+  const r = run(repo, ['approve', 'home', '--by', 'owner', '--mockup', 'docs/ui/mockups/home.png']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'),
+    new RegExp(`^mockup: docs/ui/mockups/home\\.png \\(approved ${today()}, owner\\)$`, 'm'));
+});
+
+test('approve --captures copies and records', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
+  write(repo, '.ui-check/captures/home-360-light.png', 'light');
+  write(repo, '.ui-check/captures/home-1440-light.png', 'wide');
+  write(repo, '.ui-check/captures/report-360-light.png', 'other');
+  const r = run(repo, ['approve', 'home', '--by', 'owner', '--captures']);
+  assert.equal(r.code, 0, r.stderr);
+  const dir = join(repo, 'docs/ui/approved');
+  assert.deepEqual(readdirSync(dir).sort(), ['home-1440-light.png', 'home-360-light.png']);
+  assert.equal(readFileSync(join(dir, 'home-360-light.png'), 'utf8'), 'light');
+  assert.match(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'),
+    new RegExp(`^approved: docs/ui/approved/home-1440-light\\.png docs/ui/approved/home-360-light\\.png \\(${today()}, owner\\)$`, 'm'));
+});
+
+test('approve: unknown screen exits 1 and copies nothing', () => {
+  const repo = makeRepo({ 'docs/ui/screens.md': AB_MAP });
+  write(repo, '.ui-check/captures/nowhere-360-light.png', 'png');
+  const r = run(repo, ['approve', 'nowhere', '--by', 'owner', '--captures']);
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr, 'ui-check: unknown screen nowhere\n');
+  assert.equal(existsSync(join(repo, 'docs/ui/approved')), false);
+  assert.equal(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), AB_MAP);
+});
+
+// stale
+
+function recorded(files, map = AB_MAP) {
+  const repo = makeRepo({ 'docs/ui/screens.md': map, ...files });
+  write(repo, '.ui-check/captures/home-360-light.png', 'png');
+  write(repo, '.ui-check/captures/settings-billing-360-light.png', 'png');
+  for (const name of ['home', 'Settings / Billing']) assert.equal(run(repo, ['record', name]).code, 0);
+  return repo;
+}
+
+test('stale: fresh entries report nothing', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  const r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'routes: not checked (pass --routes)\nstale: 0, gone: 0, unmapped: 0\n');
+});
+
+test('stale: edit after record is stale', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, 'src/home.tsx', 'y');
+  const r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`^stale home \\(src/home\\.tsx changed since ${today()}\\)$`, 'm'));
+  assert.match(r.stdout, /^stale: 1, gone: 0, unmapped: 0\n$/m);
+});
+
+test('stale: deleted file is gone', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  rmSync(join(repo, 'src/home.tsx'));
+  const r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^gone home \(src\/home\.tsx\)$/m);
+  assert.ok(r.stdout.endsWith('stale: 0, gone: 1, unmapped: 0\n'));
+});
+
+test('stale: multi-file entry', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, 'src/b.tsx', 'B2');
+  let r = run(repo, ['stale']);
+  assert.match(r.stdout, new RegExp(`^stale Settings / Billing \\(src/b\\.tsx, src/a\\.tsx changed since ${today()}\\)$`, 'm'));
+  assert.ok(r.stdout.endsWith('stale: 1, gone: 0, unmapped: 0\n'));
+  // Restoring b makes it fresh again: the hash covers content, not mtimes.
+  write(repo, 'src/b.tsx', 'B');
+  assert.ok(run(repo, ['stale']).stdout.endsWith('stale: 0, gone: 0, unmapped: 0\n'));
+  rmSync(join(repo, 'src/a.tsx'));
+  r = run(repo, ['stale']);
+  assert.match(r.stdout, /^gone Settings \/ Billing \(src\/a\.tsx\)$/m);
+  assert.ok(r.stdout.endsWith('stale: 0, gone: 1, unmapped: 0\n'));
+});
+
+test('stale: routes from stdin', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  const r = run(repo, ['stale', '--routes', '-'], JSON.stringify(['/', { path: '/settings' }, '/settings/billing']));
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'unmapped /settings\nstale: 0, gone: 0, unmapped: 1\n');
+});
+
+test('stale: routes from a file', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  write(repo, 'routes.json', JSON.stringify(['/', '/settings']));
+  const r = run(repo, ['stale', '--routes', 'routes.json']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'unmapped /settings\nstale: 0, gone: 0, unmapped: 1\n');
+  const bad = run(repo, ['stale', '--routes', '-'], '{"not": "an array"}');
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /^ui-check: routes must be a JSON array/);
+  const missing = run(repo, ['stale', '--routes', 'nope.json']);
+  assert.equal(missing.code, 1);
+  assert.equal(missing.stderr, 'ui-check: no routes file at nope.json\n');
+});
+
+test('stale: without routes says not checked', () => {
+  const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
+  const r = run(repo, ['stale']);
+  assert.match(r.stdout, /^routes: not checked \(pass --routes\)$/m);
 });

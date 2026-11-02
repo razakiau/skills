@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,6 +17,10 @@ export const USAGE = [
   '  node uicheck.mjs map [--json] [<screen> | --family <family> | --sibling-of <screen>]',
   '  node uicheck.mjs init',
   '  node uicheck.mjs capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .ui-check/captures]',
+  '  node uicheck.mjs touched [<base>]',
+  '  node uicheck.mjs record <screen> [--out .ui-check/captures]',
+  '  node uicheck.mjs approve <screen> --by <name> (--mockup <path> | --captures) [--out .ui-check/captures]',
+  '  node uicheck.mjs stale [--routes <file|->]',
   '',
 ].join('\n');
 
@@ -93,15 +98,18 @@ export function parseMap(text) {
   return { eol, screens: screens.map(({ name, slug: s, fields, line }) => ({ name, slug: s, fields, line })) };
 }
 
+// The one entry whose name or slug is `name`. Two matches are an error, never a silent pick.
 function find(screens, name) {
   const want = slug(name);
-  const hit = screens.find((s) => s.name === name) ?? screens.find((s) => s.slug === want);
-  if (!hit) throw new UiCheckError(`unknown screen ${name}`, 1);
-  return hit;
+  const hits = screens.filter((s) => s.name === name || s.slug === want);
+  if (!hits.length) throw new UiCheckError(`unknown screen ${name}`, 1);
+  if (hits.length > 1) throw new UiCheckError(`ambiguous screen ${name}: ${hits.length} entries`, 1);
+  return hits[0];
 }
 
 // Sets one field of one entry and leaves every other byte of the map as it was.
 export function setField(text, screen, key, value) {
+  if (/[\r\n]/.test(String(value))) throw new UiCheckError('value must be one line', 2);
   const { eol, lines, screens } = scan(text);
   const entry = find(screens, screen);
   const line = `${key}: ${value}`;
@@ -111,27 +119,44 @@ export function setField(text, screen, key, value) {
   return lines.join(eol);
 }
 
+// A line of AGENTS.md that starts (after an optional list marker) with `Screen map: <path>`.
+const MAP_LINE = /^[ \t]*(?:[-*+][ \t]+|\d+\.[ \t]+)?screen map:[ \t]*`?([^`\s]+)`?/im;
+
 // docs/ui/screens.md, unless AGENTS.md names another path on a `Screen map:` line.
+// A path that leaves the repo top is refused.
 export function mapPath(top) {
   const agents = join(top, 'AGENTS.md');
   if (existsSync(agents)) {
-    const m = /screen map:\s*`?([^`\s]+)`?/i.exec(readFileSync(agents, 'utf8'));
-    if (m) return join(top, m[1]);
+    const m = MAP_LINE.exec(readFileSync(agents, 'utf8'));
+    if (m) {
+      const path = resolve(top, m[1]);
+      const rel = relative(top, path);
+      if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
+        throw new UiCheckError(`screen map path ${m[1]} is outside the repo`, 1);
+      }
+      return path;
+    }
   }
   return join(top, DEFAULT_MAP);
 }
 
-const isOurs = (text) => text.split(/\r?\n/, 1)[0] === MARKER;
+const BOM = '\uFEFF';
+const stripBom = (text) => (text.startsWith(BOM) ? text.slice(1) : text);
+const isOurs = (text) => stripBom(text).split(/\r?\n/, 1)[0] === MARKER;
+const mixedEol = (text) => text.includes('\r\n') && /(^|[^\r])\n/.test(text);
 const notOurs = (top, path) => new UiCheckError(
   `${relative(top, path)} is not a ui-check screen map; set "Screen map: <path>" in AGENTS.md`, 1);
 
-// The map file, refused when it is missing or belongs to another tool.
+// The map file, refused when it is missing, belongs to another tool or mixes line endings.
+// `text` has any leading BOM removed; `bom` holds it so a writer can put it back.
 export function readMap(top) {
   const path = mapPath(top);
   if (!existsSync(path)) throw new UiCheckError(`no screen map at ${relative(top, path)}; run init`, 1);
-  const text = readFileSync(path, 'utf8');
+  const raw = readFileSync(path, 'utf8');
+  const text = stripBom(raw);
   if (!isOurs(text)) throw notOurs(top, path);
-  return { path, text };
+  if (mixedEol(text)) throw new UiCheckError(`${relative(top, path)} mixes CRLF and LF line endings; normalise it first`, 1);
+  return { path, text, bom: raw.slice(0, raw.length - text.length) };
 }
 
 // Reads `--flag value` options and positionals; anything unknown is a usage error.
@@ -311,7 +336,201 @@ async function captureCmd(args) {
   if (bad) throw new UiCheckError(`${bad} capture${bad > 1 ? 's' : ''} not valid; fix the page and capture again`, 1);
 }
 
-const DISPATCH = { map: mapCmd, init: initCmd, capture: captureCmd };
+// `sha256:` plus 12 hex over the bytes of the entry's files, sorted by path and joined with a NUL byte.
+// null when the field lists no file or any listed file is missing.
+export function fileHash(top, fileField) {
+  const files = list(fileField).sort();
+  if (!files.length || files.some((f) => !existsSync(join(top, f)))) return null;
+  const parts = files.flatMap((f, i) => (i ? [Buffer.from([0]), readFileSync(join(top, f))] : [readFileSync(join(top, f))]));
+  return 'sha256:' + createHash('sha256').update(Buffer.concat(parts)).digest('hex').slice(0, 12);
+}
+
+const UI_FILE = /\.(tsx|jsx|vue|svelte|html|css|scss)$/;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// A hint, not a resolver: does `text` pull in a file whose basename (without extension) is `base`?
+// It looks for a quoted path ending in `base` or `base.<ext>` inside `import ... from '...'`,
+// a bare `import '...'`, `require('...')`, a CSS `@import` or a `<link href="...">`.
+// Aliases, index files and re-exports are not followed.
+function importsBasename(text, base) {
+  const q = `['"](?:[^'"\\n]*/)?${escapeRe(base)}(?:\\.[A-Za-z0-9]+)?['"]`;
+  return new RegExp(`import\\s[^;]*?from\\s*${q}|import\\s*${q}|require\\(\\s*${q}|@import\\s+(?:url\\(\\s*)?${q}|<link\\b[^>]*\\bhref\\s*=\\s*${q}`).test(text);
+}
+
+function gitLines(top, args) {
+  return execFileSync('git', ['-c', 'core.quotepath=off', ...args], { cwd: top, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    .split('\n').filter(Boolean);
+}
+
+function touchedCmd(args) {
+  const { positionals } = parseArgs(args, { positionals: 1 });
+  const base = positionals[0] ?? 'HEAD';
+  const cwd = process.cwd();
+  try {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, stdio: 'ignore' });
+  } catch {
+    throw new UiCheckError('touched needs git', 2);
+  }
+  const top = repoTop(cwd);
+  const { text } = readMap(top);
+  const { screens } = parseMap(text);
+  let changed;
+  try {
+    changed = [...new Set([
+      ...gitLines(top, ['diff', '--name-only', base, '--']),
+      ...gitLines(top, ['ls-files', '--others', '--exclude-standard']),
+    ])].sort();
+  } catch {
+    throw new UiCheckError(`git diff failed for base ${base}`, 1);
+  }
+  const out = [];
+  const owned = new Set();
+  for (const s of screens) {
+    const files = list(s.fields.file);
+    files.forEach((f) => owned.add(f));
+    const hit = files.filter((f) => changed.includes(f));
+    if (hit.length) out.push(`screen ${s.name} (${hit.join(', ')})`);
+  }
+  const textOf = (f) => (existsSync(join(top, f)) ? readFileSync(join(top, f), 'utf8') : '');
+  for (const f of changed.filter((c) => UI_FILE.test(c) && !owned.has(c))) {
+    out.push(`shared ${f}`);
+    const name = f.split('/').pop().replace(/\.[^.]+$/, '');
+    for (const s of screens) {
+      if (list(s.fields.file).some((own) => importsBasename(textOf(own), name))) out.push(`  used by ${s.name}`);
+    }
+  }
+  process.stdout.write(out.map((l) => `${l}\n`).join(''));
+}
+
+// The capture dir from --out, relative to the repo top unless absolute.
+function outDir(top, options) {
+  const opt = options['--out'] ?? '.ui-check/captures';
+  return isAbsolute(opt) ? opt : join(top, opt);
+}
+
+const shownFrom = (top) => (path) => (relative(top, path).startsWith('..') ? path : relative(top, path));
+const VARIANT = /^[0-9]+-(light|dark)(-[a-z0-9-]+)?$/;
+
+// The PNGs in dir named `<slug>-<width>-<theme>[-<state>].png`, sorted; `settings` never picks up `settings-billing-...`.
+function capturesOf(dir, s) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.startsWith(`${s}-`) && f.endsWith('.png') && VARIANT.test(f.slice(s.length + 1, -4)))
+    .sort();
+}
+
+// Finds the entry (so an unknown or ambiguous name fails before anything else) and its captures.
+// `check` runs on the parsed arguments first, so a usage error never depends on the map.
+function entryAndCaptures(cmd, args, extra, check = () => {}) {
+  const parsed = parseArgs(args, { positionals: 1, options: ['--out', ...(extra.options ?? [])], flags: extra.flags ?? [] });
+  if (!parsed.positionals.length) throw new UiCheckError(`${cmd} needs a screen`, 2);
+  check(parsed);
+  const top = repoTop();
+  const map = readMap(top);
+  const entry = find(scan(map.text).screens, parsed.positionals[0]);
+  const dir = outDir(top, parsed.options);
+  return { ...parsed, top, map, entry, dir, shown: shownFrom(top) };
+}
+
+function noCaptures(entry, dir, shown) {
+  return new UiCheckError(`no captures for ${entry.slug} in ${shown(dir)}`, 1);
+}
+
+function recordCmd(args) {
+  const { top, map, entry, dir, shown } = entryAndCaptures('record', args, {});
+  const files = capturesOf(dir, entry.slug);
+  if (!files.length) throw noCaptures(entry, dir, shown);
+  if (!list(entry.fields.file).length) throw new UiCheckError(`screen ${entry.name} has no file: line; add one before record`, 1);
+  const hash = fileHash(top, entry.fields.file);
+  if (!hash) throw new UiCheckError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
+  const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();
+  writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'last-capture', `${today()} ${hash} ${variants.join(' ')}`));
+  process.stdout.write(`recorded ${entry.name}: ${variants.join(' ')}\n`);
+}
+
+const APPROVED_DIR = 'docs/ui/approved';
+
+function approveCmd(args) {
+  const { options, top, map, entry, dir, shown } = entryAndCaptures('approve', args, { options: ['--by', '--mockup'], flags: ['--captures'] }, ({ options: o, flags: f }) => {
+    if (!o['--by'] || !o['--by'].trim()) throw new UiCheckError('approve needs --by <name>; only the owner approves', 2);
+    if ((o['--mockup'] !== undefined) === Boolean(f['--captures'])) throw new UiCheckError('give one of --mockup <path> or --captures', 2);
+  });
+  const by = options['--by'];
+  const mockup = options['--mockup'];
+  if (mockup !== undefined) {
+    if (!existsSync(resolve(top, mockup))) throw new UiCheckError(`no file at ${mockup}`, 1);
+    // setField runs before the write, so a multi-line --by fails with the map untouched.
+    writeFileSync(map.path, map.bom + setField(map.text, entry.name, 'mockup', `${mockup} (approved ${today()}, ${by.trim()})`));
+    process.stdout.write(`approved mockup ${mockup} for ${entry.name}\n`);
+    return;
+  }
+  const files = capturesOf(dir, entry.slug);
+  if (!files.length) throw noCaptures(entry, dir, shown);
+  const dest = files.map((f) => `${APPROVED_DIR}/${f}`);
+  const next = setField(map.text, entry.name, 'approved', `${dest.join(' ')} (${today()}, ${by.trim()})`);
+  mkdirSync(join(top, APPROVED_DIR), { recursive: true });
+  files.forEach((f, i) => copyFileSync(join(dir, f), join(top, dest[i])));
+  writeFileSync(map.path, map.bom + next);
+  process.stdout.write(dest.map((d) => `copied ${d}\n`).join(''));
+}
+
+// The route strings of a JSON array of strings or `{ path }` objects.
+function parseRoutes(raw) {
+  let data;
+  try { data = JSON.parse(raw); } catch (err) { throw new UiCheckError(`routes are not JSON: ${err.message}`, 1); }
+  const bad = () => new UiCheckError('routes must be a JSON array of strings or {"path": ...} objects', 1);
+  if (!Array.isArray(data)) throw bad();
+  return data.map((r) => {
+    if (typeof r === 'string') return r;
+    if (r && typeof r.path === 'string') return r.path;
+    throw bad();
+  });
+}
+
+// Reports entries whose files changed since last-capture, entries whose files are gone and
+// routes with no entry. It never edits anything, so it exits 0 whatever it finds.
+function staleCmd(args) {
+  const { options } = parseArgs(args, { options: ['--routes'] });
+  const top = repoTop();
+  const { text } = readMap(top);
+  const { screens } = parseMap(text);
+  const out = [];
+  let stale = 0, gone = 0, unmapped = 0;
+  for (const s of screens) {
+    const field = s.fields.file;
+    const files = list(field);
+    if (!files.length) continue;
+    const missing = files.filter((f) => !existsSync(join(top, f)));
+    if (missing.length) {
+      out.push(`gone ${s.name} (${missing.join(', ')})`);
+      gone++;
+      continue;
+    }
+    const [date, hash] = (s.fields['last-capture'] ?? '').split(/\s+/);
+    if (!hash) continue; // Never recorded: nothing to compare with.
+    if (hash !== fileHash(top, field)) {
+      out.push(`stale ${s.name} (${field} changed since ${date})`);
+      stale++;
+    }
+  }
+  const from = options['--routes'];
+  if (from === undefined) out.push('routes: not checked (pass --routes)');
+  else {
+    if (from !== '-' && !existsSync(resolve(process.cwd(), from))) throw new UiCheckError(`no routes file at ${from}`, 1);
+    const raw = from === '-' ? readFileSync(0, 'utf8') : readFileSync(resolve(process.cwd(), from), 'utf8');
+    const mapped = new Set(screens.map((s) => s.fields.route).filter(Boolean));
+    for (const r of new Set(parseRoutes(raw))) {
+      if (!mapped.has(r)) {
+        out.push(`unmapped ${r}`);
+        unmapped++;
+      }
+    }
+  }
+  out.push(`stale: ${stale}, gone: ${gone}, unmapped: ${unmapped}`);
+  process.stdout.write(out.map((l) => `${l}\n`).join(''));
+}
+
+const DISPATCH = { map: mapCmd, init: initCmd, capture: captureCmd, touched: touchedCmd, record: recordCmd, approve: approveCmd, stale: staleCmd };
 // The CLI command names; SKILL.md may only mention these.
 export const COMMANDS = Object.keys(DISPATCH);
 

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home</title>
+  <link rel="stylesheet" href="tokens.css">
+</head>
+<body>
+  <header class="header">
+    <h1>Home</h1>
+  </header>
+  <!-- Mounted only when the dark theme is active, so one theme fails and the other passes. -->
+  <script>
+    if (matchMedia('(prefers-color-scheme: dark)').matches) {
+      const overlay = document.createElement('vite-error-overlay');
+      overlay.innerHTML = '<pre>[plugin:vite:css] Unknown word in "src/dark.css".</pre>';
+      document.body.append(overlay);
+    }
+  </script>
+</body>
+</html>
