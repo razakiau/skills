@@ -28,6 +28,7 @@ Required files:
 - `ARCHITECTURE.md`
 - `.agents/code-map.md`
 - `DESIGN.md` (only with UI)
+- `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
 
 It adds:
@@ -36,6 +37,7 @@ It adds:
 - A decisions folder with an index, and a glossary.
 - ARCHITECTURE.md plus the code map.
 - DESIGN.md before the first screen is built.
+- With UI, a screen map in `docs/ui/screens.md`: each screen, its approved mockup and when it was last checked. check-screens keeps it true; AGENTS.md gets the line "After any UI change, run check-screens before reporting done."
 - CONSTRAINTS.md, the quality bar.
 - One `check` command that runs the build, lint, tests and the doc check.
 - A "how to verify" section in AGENTS.md. It names the command that starts the app and the tool an agent uses to check it.
@@ -56,6 +58,7 @@ Required files:
 - `ARCHITECTURE.md`
 - `.agents/code-map.md`
 - `DESIGN.md` (only with UI)
+- `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
 - `docs/threat-model.md`
 - `docs/runbooks/`
@@ -82,6 +85,7 @@ Required files:
 - `ARCHITECTURE.md`
 - `.agents/code-map.md`
 - `DESIGN.md` (only with UI)
+- `docs/ui/screens.md` (only with UI)
 - `CONSTRAINTS.md`
 - `docs/threat-model.md`
 - `docs/runbooks/`

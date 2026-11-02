@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as foundry from './foundry.mjs';
-import { readState, writeState, signals, REQUIRED, digest, gardenRange } from './foundry.mjs';
+import { readState, writeState, signals, REQUIRED, UI_ONLY, requiredFor, digest, gardenRange } from './foundry.mjs';
 
 const FOUNDRY = join(dirname(fileURLToPath(import.meta.url)), 'foundry.mjs');
 
@@ -169,9 +169,12 @@ function sessionsRoot(entries) {
 }
 
 test('REQUIRED: cumulative per stage, in order', () => {
-  const product = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'CONSTRAINTS.md'];
+  const product = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', '.agents/code-map.md', 'DESIGN.md', 'docs/ui/screens.md', 'CONSTRAINTS.md'];
   const live = [...product, 'docs/threat-model.md', 'docs/runbooks/'];
   assert.deepEqual(REQUIRED, { explore: ['AGENTS.md'], product, live, scale: live });
+  assert.deepEqual(UI_ONLY, ['DESIGN.md', 'docs/ui/screens.md']);
+  assert.deepEqual(requiredFor('product', false), product.filter((f) => !UI_ONLY.includes(f)));
+  assert.deepEqual(requiredFor('product', true), product);
 });
 
 test('signals: empty repo proposes explore', () => {
@@ -221,6 +224,7 @@ test('signals: 30 commits proposes product', () => {
   assert.ok(s.reasons.includes('30 commits'), s.reasons.join('; '));
   assert.equal(s.files['PRODUCT.md'], false);
   assert.equal('DESIGN.md' in s.files, false, 'DESIGN.md only with UI');
+  assert.equal('docs/ui/screens.md' in s.files, false, 'the screen map only with UI');
 });
 
 test('signals: age and PRODUCT.md propose product', () => {
@@ -251,7 +255,7 @@ test('signals: deploy workflow + auth proposes live', () => {
   assert.deepEqual(s.auth_code, ['src/auth/login.ts']);
   assert.ok(s.reasons.includes('deployed: .github/workflows/ci.yml'), s.reasons.join('; '));
   assert.ok(s.reasons.includes('auth code: src/auth/login.ts'), s.reasons.join('; '));
-  assert.deepEqual(Object.keys(s.files), REQUIRED.live.filter((f) => f !== 'DESIGN.md'));
+  assert.deepEqual(Object.keys(s.files), REQUIRED.live.filter((f) => !UI_ONLY.includes(f)));
 });
 
 test('signals: deploy evidence kinds; deployed alone is not live', () => {
@@ -319,6 +323,7 @@ test('signals: has_ui from tsx', () => {
   const s = signals(makeRepo({ 'src/App.tsx': 'x' }), NO_SESSIONS);
   assert.equal(s.has_ui, true);
   assert.equal(s.files['DESIGN.md'], undefined, 'explore requires no DESIGN.md');
+  assert.equal(s.files['docs/ui/screens.md'], undefined, 'explore requires no screen map');
 });
 
 test('signals: has_ui ignores test paths, sees UI directories', () => {
@@ -328,6 +333,7 @@ test('signals: has_ui ignores test paths, sees UI directories', () => {
   }
   const s = signals(makeRepo({ 'src/App.svelte': 'x', 'PRODUCT.md': 'p' }), NO_SESSIONS);
   assert.equal(s.files['DESIGN.md'], false, 'product with UI requires DESIGN.md');
+  assert.equal(s.files['docs/ui/screens.md'], false, 'product with UI requires the screen map');
 });
 
 test('signals CLI: --json and the summary', () => {
@@ -372,7 +378,7 @@ function docRepo(files = {}, state = {}) {
     'docs/decisions/0000-template.md': '# NNNN title\n',
     'docs/decisions/0001-start.md': '# 0001 start\n',
   };
-  for (const f of REQUIRED.product) if (f !== 'DESIGN.md' && !(f in base)) base[f] = `# ${f}\n`;
+  for (const f of REQUIRED.product) if (!UI_ONLY.includes(f) && !(f in base)) base[f] = `# ${f}\n`;
   const all = { ...base, ...files };
   for (const k of Object.keys(all)) if (all[k] === null) delete all[k];
   return makeRepo(all);
@@ -466,12 +472,14 @@ test('doc-check: over budget fails when migrated, warns when unmigrated', () => 
   assert.equal(big.code, 0, 'budget_lines is read from the state');
 });
 
-test('doc-check: DESIGN.md required only with UI', () => {
+test('doc-check: DESIGN.md and the screen map required only with UI', () => {
   assert.equal(docCheck(docRepo()).code, 0);
   const r = docCheck(docRepo({}, { has_ui: true }));
   assert.equal(r.code, 1);
-  assert.deepEqual(findings(r, 'required'), ['doc-check: FAIL required: DESIGN.md']);
-  assert.equal(docCheck(docRepo({ 'DESIGN.md': '# D\n' }, { has_ui: true })).code, 0);
+  assert.deepEqual(findings(r, 'required'), ['doc-check: FAIL required: DESIGN.md', 'doc-check: FAIL required: docs/ui/screens.md']);
+  const noMap = docCheck(docRepo({ 'DESIGN.md': '# D\n' }, { has_ui: true }));
+  assert.deepEqual(findings(noMap, 'required'), ['doc-check: FAIL required: docs/ui/screens.md']);
+  assert.equal(docCheck(docRepo({ 'DESIGN.md': '# D\n', 'docs/ui/screens.md': '# S\n' }, { has_ui: true })).code, 0);
 });
 
 test('doc-check: required lists REQUIRED[stage] in order', () => {
@@ -747,6 +755,54 @@ test('init-files: templates are short and free of dashes', () => {
   const repo = makeRepo({ 'a.txt': 'x' });
   init(repo, '--stage', 'live');
   assert.ok(read(repo, 'AGENTS.md').split('\n').length - 1 < 40);
+});
+
+const UI_LINE = 'After any UI change, run check-screens before reporting done.';
+
+test('init-files: a UI repo at product gets the screen map, its link and the check-screens line', () => {
+  const repo = makeRepo({ 'web/App.tsx': 'x' });
+  const r = init(repo, '--stage', 'product');
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.split('\n').includes('created docs/ui/screens.md'), r.stdout);
+  const map = read(repo, 'docs/ui/screens.md');
+  assert.equal(map.split('\n')[0], '<!-- check-screens map v1 -->', 'check-screens accepts the file as its own');
+  assert.equal(map, readFileSync(join(dirname(FOUNDRY), '..', '..', 'check-screens', 'templates', 'screens.md'), 'utf8'), 'same template as check-screens');
+  const agents = read(repo, 'AGENTS.md');
+  assert.ok(agents.includes('](docs/ui/screens.md)'), agents);
+  assert.ok(agents.includes(`${UI_LINE}\n`), agents);
+  assert.deepEqual(repoCheck(repo).lines.filter((l) => l.includes(' FAIL ')).sort(), ['doc-check: FAIL required: .agents/code-map.md', 'doc-check: FAIL required: DESIGN.md']);
+});
+
+test('init-files: no screen map or check-screens line without UI, or at explore', () => {
+  const plain = makeRepo({ 'a.txt': 'x' });
+  init(plain, '--stage', 'product');
+  assert.ok(!exists(plain, 'docs/ui/screens.md'));
+  assert.ok(!read(plain, 'AGENTS.md').includes(UI_LINE));
+  const early = makeRepo({ 'web/App.tsx': 'x' });
+  init(early, '--stage', 'explore');
+  assert.ok(!exists(early, 'docs/ui/screens.md'));
+  assert.ok(!read(early, 'AGENTS.md').includes(UI_LINE));
+});
+
+test('init-files: keeps an existing screen map; grow lists the check-screens line for a kept AGENTS.md', () => {
+  const repo = makeRepo({ 'web/App.tsx': 'x' });
+  init(repo, '--stage', 'explore');
+  write(repo, 'docs/ui/screens.md', '<!-- check-screens map v1 -->\n# mine\n');
+  const r = init(repo, '--stage', 'product');
+  assert.equal(r.code, 0, r.stderr);
+  const out = r.stdout.split('\n');
+  assert.ok(out.includes('kept docs/ui/screens.md (exists)'), r.stdout);
+  assert.equal(read(repo, 'docs/ui/screens.md'), '<!-- check-screens map v1 -->\n# mine\n');
+  assert.ok(out.includes('agents-md: add link to docs/ui/screens.md'), r.stdout);
+  assert.ok(out.includes(`agents-md: add line: ${UI_LINE}`), r.stdout);
+});
+
+test('init-files: the recorded has_ui wins over the file scan', () => {
+  const repo = makeRepo({ 'web/App.tsx': 'x' });
+  init(repo, '--stage', 'explore');
+  run(repo, ['state', '--set', 'has_ui=false']);
+  init(repo, '--stage', 'product');
+  assert.ok(!exists(repo, 'docs/ui/screens.md'), 'the owner said this repo has no UI');
 });
 
 test('init-files: never writes DESIGN.md or code-map.md', () => {
@@ -1171,7 +1227,9 @@ test('hook: one missing names it alone; DESIGN.md counts only when the state has
   const one = run(hookRepo({ stage: 'product' }, docs), ['hook']);
   assert.equal(one.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
   const ui = run(hookRepo({ stage: 'product', has_ui: true }, PRODUCT_DOCS), ['hook']);
-  assert.equal(ui.stdout, 'foundry: 1 missing for product (DESIGN.md), 0 interview(s) queued; run foundry to see them.\n');
+  assert.equal(ui.stdout, 'foundry: 2 missing for product (DESIGN.md, docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
+  const map = run(hookRepo({ stage: 'product', has_ui: true }, [...PRODUCT_DOCS, 'DESIGN.md']), ['hook']);
+  assert.equal(map.stdout, 'foundry: 1 missing for product (docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: nothing missing but an open interview prints (none)', () => {

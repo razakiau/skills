@@ -29,7 +29,7 @@ For each FAIL, name the file that owns the fix:
 - `link`: the file before `->`; fix the link or create the target.
 - `command`: AGENTS.md at the line it names.
 - `decisions`: `docs/decisions/index.md`.
-- `required`: the missing file itself. When a provider owns it, as with `DESIGN.md` or `.agents/code-map.md`, name the queued interview.
+- `required`: the missing file itself. When a provider owns it, as with `DESIGN.md` or `.agents/code-map.md`, name the queued interview. A missing `docs/ui/screens.md` is fixed by `node <check-screens dir>/scripts/check-screens.mjs init` (the folder holding check-screens' SKILL.md) when check-screens is installed, else by grow.
 - `state`: `.agents/foundry.json`.
 - `budget` or `precedence`: AGENTS.md. A WARN there means `agents_md.state` is `unmigrated`; migrate it as in [init.md](init.md).
 - A build, lint or test failure: the source file it names.

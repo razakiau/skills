@@ -12,6 +12,7 @@ A theme opens at its stage and stays open at every later stage.
 | glossary | explore or product | Agents and people need one name for each domain concept. |
 | architecture | explore or product | A short map of boundaries and where shared concepts live stops agents from duplicating them. |
 | design-system | product | A written design system keeps screens consistent. Write it before the first screen. |
+| screens | product | Only with UI. A map of the screens with their approved mockups, kept true by a check after each UI change, so the agent looks at a screen before the owner does. |
 | quality-bar | product | The thresholds a change must meet, written once, so each review doesn't invent them. |
 | verification | product | An agent must show that a change works: the command that starts the app and the tool that checks it. |
 | security-review | product | The reviewer of each change reads it for access control, input handling and secrets. |

@@ -1,5 +1,5 @@
 #!/bin/sh
-# foundry doc-check v1.0.0
+# foundry doc-check v1.1.0
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
 # budget, stage-required files and the precedence sentence.
@@ -187,7 +187,7 @@ check_agents_md() {
 # Must match REQUIRED in foundry.mjs, in the same order.
 check_required() {
   explore='AGENTS.md'
-  product="$explore PRODUCT.md docs/decisions/index.md GLOSSARY.md ARCHITECTURE.md .agents/code-map.md DESIGN.md CONSTRAINTS.md"
+  product="$explore PRODUCT.md docs/decisions/index.md GLOSSARY.md ARCHITECTURE.md .agents/code-map.md DESIGN.md docs/ui/screens.md CONSTRAINTS.md"
   live="$product docs/threat-model.md docs/runbooks/"
   case $stage in
     explore) required=$explore ;;
@@ -199,7 +199,7 @@ check_required() {
       ;;
   esac
   for f in $required; do
-    if [ "$f" = DESIGN.md ] && [ "$has_ui" != true ]; then continue; fi
+    case $f in DESIGN.md | docs/ui/screens.md) if [ "$has_ui" != true ]; then continue; fi ;; esac
     case $f in
       */) if [ ! -d "$root/$f" ]; then finding FAIL required "$f"; fi ;;
       *) if [ ! -f "$root/$f" ]; then finding FAIL required "$f"; fi ;;
