@@ -1,0 +1,14 @@
+# foundry local overlay
+
+Copy to ~/.config/foundry/local.md and edit. Foundry reads it before its seed table and never copies it into a repo.
+
+store: ~/code/my-skills (repo example-user/my-skills; add an entry to sources.yaml and open a PR)
+
+| Theme | Provider | Kind (skill/mcp/tool) | License | Link | Fallback |
+|---|---|---|---|---|---|
+| intent | papers search (my-search MCP) | mcp | n/a | self-hosted |  |
+| design-system | image generation (my-images MCP) | mcp | n/a | https://mcp.example.internal |  |
+
+Notes:
+
+- Find these tools with mcp_tool_search.
