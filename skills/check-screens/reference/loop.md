@@ -122,7 +122,7 @@ Done: the disposition is `ship`, or 3 rounds have run.
 
 Report to the owner:
 
-1. The final captures, inline as images, phone first. Paths alone are not enough.
+1. The final captures, inline as images, phone first, not only their paths.
 2. The differences found and fixed, one line each.
 3. The `adaptation` items, each with its reason.
 4. The `ask` items, as questions.

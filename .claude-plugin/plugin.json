@@ -1,6 +1,6 @@
 {
   "name": "razakiau-skills",
-  "description": "Agent skills: no-slop (prose editing), strategic-programming (code placement and diff audit) and foundry (repo stages, agent docs and readiness audit).",
+  "description": "Agent skills: no-slop (prose editing), strategic-programming (code placement and diff audit), foundry (repo stages, agent docs and readiness audit) and check-screens (screen review before done).",
   "license": "MIT",
   "repository": "https://github.com/razakiau/skills"
 }

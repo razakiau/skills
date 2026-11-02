@@ -1,6 +1,6 @@
 # Providers
 
-check-screens names what it needs, not a tool. For each need, use the first provider you can reach. Never install one yourself: name it, say why, and let the owner install it.
+The table lists what check-screens needs. For each need, use the first provider you can reach. Never install one yourself: name it, say why, and let the owner install it.
 
 | Need | Providers, in order |
 | --- | --- |
