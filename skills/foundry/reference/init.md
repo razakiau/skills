@@ -29,13 +29,13 @@ Done: the output is shown, and each `warn` line has the owner's answer.
 ### 4. Queue the other interviews
 
 The script does not write the queue. Edit `.agents/foundry.json` yourself and append to `queue`. Keep 2-space JSON with one key per line, as the script writes it: `.agents/doc-check.sh` reads the file line by line.
-Each entry is `{"interview": ..., "when": ..., "provider": ..., "done": false}`. Leave out `provider` when only the fallback applies. Queue what the stage opens:
+Each entry is `{"interview": ..., "when": ..., "provider": ..., "done": false}`. Leave out `provider` when only the fallback applies. Queue what the stage opens, at the stage named on each line:
 
-- `design brief and DESIGN.md`, when `before the first screen`, only with UI. Provider: Impeccable `init` and `document`, else the fallback questions. The screen map, `docs/ui/screens.md`, needs no interview: `init-files` writes it at product with UI, and check-screens fills it in as screens are built.
-- `code map`, when `at the first change that touches two modules`. Provider: strategic-programming, else its `reference/code-map.md` template.
-- `glossary`, when `when a second domain term is disputed, or at the first decision`.
-- `quality bar`, when `before the first PR at product`.
-- `threat model`, when `on entering live`.
+- product: `design brief and DESIGN.md`, when `before the first screen`, only with UI. Provider: Impeccable `init` and `document`, else the fallback questions. The screen map, `docs/ui/screens.md`, needs no interview: `init-files` writes it at product with UI, and check-screens fills it in as screens are built.
+- product: `code map`, when `at the first change that touches two modules`. Provider: strategic-programming, else its `reference/code-map.md` template.
+- product: `glossary`, when `when a second domain term is disputed, or at the first decision`.
+- product: `quality bar`, when `before the first PR at product`.
+- live: `threat model`, when `on entering live`.
 
 The router in [routing.md](routing.md) judges when each moment has come. The script only stores the text.
 Done: each entry is in `queue` with `done: false`, and `node <skill dir>/scripts/foundry.mjs state` prints the file without error.

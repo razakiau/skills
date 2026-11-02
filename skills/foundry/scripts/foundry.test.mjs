@@ -1109,14 +1109,18 @@ const COMMAND_REFS = ['routing.md', 'init.md', 'audit.md', 'grow.md', 'providers
 
 test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.md names a real command', () => {
   assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook']);
-  let mentions = 0;
+  const named = new Set();
+  const files = new Set();
   for (const f of readdirSync(REFS).filter((n) => n.endsWith('.md'))) {
     for (const m of ref(f).matchAll(/node <skill dir>\/scripts\/foundry\.mjs(?: +([^\s`]+))?/g)) {
-      mentions++;
       assert.ok(foundry.COMMANDS.includes(m[1]), `${f}: unknown command ${m[1]}`);
+      named.add(m[1]);
+      files.add(f);
     }
   }
-  assert.ok(mentions >= COMMAND_REFS.length, `mentions: ${mentions}`);
+  for (const f of COMMAND_REFS) assert.ok(files.has(f), `${f} names a foundry command`);
+  // hook runs from the installed git hook, never from a reference step.
+  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook')) assert.ok(named.has(c), `some reference runs ${c}`);
 });
 
 test('refs: every relative link in reference/*.md resolves', () => {
@@ -1171,6 +1175,12 @@ test('refs: no prose dashes', () => {
     const prose = ref(f).replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
     prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `${f}:${i + 1}`));
   }
+});
+
+test('readme: no prose dashes', () => {
+  const readme = join(dirname(FOUNDRY), '..', '..', '..', 'README.md');
+  const prose = readFileSync(readme, 'utf8').replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `README.md:${i + 1}`));
 });
 
 test('doc-check: required list matches REQUIRED', () => {
@@ -1451,10 +1461,11 @@ test('skill: description ≤ 300 chars and names start/audit/ready', () => {
   const fm = frontmatter(readFileSync(SKILL, 'utf8'));
   assert.equal(fm.name, 'foundry');
   assert.equal(fm.license, 'MIT');
-  assert.equal(fm['metadata.version'], '1.0.0');
+  assert.equal(fm['metadata.version'], '1.1.0');
   assert.ok(fm.description.length <= 300, `description has ${fm.description.length} chars`);
   for (const re of [/project/, /audit/, /ready/]) assert.match(fm.description, re);
   assert.match(fm.description, /feature|bug/, 'says what skips it');
+  assert.match(fm.description, /skips it/, 'says it is skipped');
 });
 
 test('skill: SKILL.md under 80 lines, every link resolves', () => {

@@ -9,7 +9,7 @@ How to read the table:
 - A fallback names a foundry template, or `ask the owner` when no template fits. Its license is foundry's own (MIT).
 - The Fallback column says `yes` on the fallback row and is blank on the others.
 - An MCP row names the capability, not a server. Its link is a public server where one exists, or `self-hosted` when the owner runs their own.
-- Licenses are as GitHub reports them on 2026-11-01. Two need care: Shannon is AGPL-3.0, and Trail of Bits skills are CC-BY-SA-4.0. The defending-code harness ships an Apache 2.0 LICENSE file. The Sentry MCP is under FSL-1.1 with an Apache 2.0 future license.
+- Licenses are as GitHub reports them on 2026-11-01. Two need care: Shannon is AGPL-3.0, and Trail of Bits skills are CC-BY-SA-4.0. The defending-code harness ships an Apache 2.0 LICENSE file. The Sentry MCP is under FSL-1.1 with an Apache 2.0 future license; GitHub reports it as NOASSERTION, and the terms are in the repo's [LICENSE.md](https://github.com/getsentry/toolkit/blob/main/LICENSE.md).
 - Themes and their stages are in [themes.md](themes.md).
 
 ## Local overlay
@@ -45,6 +45,11 @@ For the same theme, its rows win over the seed rows. Never copy its contents int
 | decisions | documentation-and-adrs | skill | MIT | [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills/tree/main/skills/documentation-and-adrs) |  |
 | decisions | grill-with-docs | skill | MIT | [mattpocock/skills](https://github.com/mattpocock/skills/tree/main/skills/engineering/grill-with-docs) |  |
 | decisions | `templates/decision.md` | fallback | MIT | [templates/decision.md](../templates/decision.md) | yes |
+| specs | writing-plans | skill | MIT | [obra/superpowers](https://github.com/obra/superpowers/tree/main/skills/writing-plans) |  |
+| specs | ask the owner | fallback | MIT | n/a | yes |
+| changes | changesets | tool | MIT | [changesets/changesets](https://github.com/changesets/changesets) |  |
+| changes | release-please | tool | Apache-2.0 | [googleapis/release-please](https://github.com/googleapis/release-please) |  |
+| changes | ask the owner | fallback | MIT | n/a | yes |
 | glossary | domain-modeling | skill | MIT | [mattpocock/skills](https://github.com/mattpocock/skills/tree/main/skills/engineering/domain-modeling) |  |
 | glossary | grill-with-docs | skill | MIT | [mattpocock/skills](https://github.com/mattpocock/skills/tree/main/skills/engineering/grill-with-docs) |  |
 | glossary | `templates/GLOSSARY.md` | fallback | MIT | [templates/GLOSSARY.md](../templates/GLOSSARY.md) | yes |

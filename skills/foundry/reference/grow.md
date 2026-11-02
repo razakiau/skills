@@ -18,7 +18,7 @@ Done: the printed state shows the new stage.
 
 Run `node <skill dir>/scripts/foundry.mjs init-files --stage <next>`. Add `--skip <file>,<file>` for files an installed provider writes. Existing files print `kept <path> (exists)`.
 Handle each `warn <path> is gitignored` line as in [init.md](init.md): show it and offer `git add -f <path>`.
-Then run `node <skill dir>/scripts/foundry.mjs vendor-check`. It prints `doc-check created`, `doc-check updated` or `doc-check current`, and copies the newer doc check when needed. A newer doc check can require a file the old one did not, such as `docs/ui/screens.md` in a repo with UI: run `init-files` again at the current stage to write it.
+init-files also copies the newer doc check when needed; its `doc-check` line says `created`, `updated` or `current`. A newer doc check can require a file the old one did not, such as `docs/ui/screens.md` in a repo with UI: run `init-files` again at the current stage to write it.
 Queue the interviews the new stage opens, as in step 4 of [init.md](init.md).
 Done: the output is shown and each new theme has a queue entry or a file.
 
