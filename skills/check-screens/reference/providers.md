@@ -2,10 +2,15 @@
 
 The table lists what check-screens needs. For each need, use the first provider you can reach. Never install one yourself: name it, say why, and let the owner install it.
 
+## Local overlay
+
+If `~/.config/check-screens/local.md` exists, read it before the table. It is the owner's own file, outside any repo. It holds rows for the two native needs only, `Capture native` and `Measure native`, with the columns `Need | Provider | How`; `How` gives the commands to run. Its rows come before the table's rows for the same need. Web needs always use the table. Never copy the file's contents into a repo, a commit, a PR or a report. A template is in [../templates/local.md.example](../templates/local.md.example).
+
 | Need | Providers, in order |
 | --- | --- |
 | Capture web | Playwright (the `capture` command, or a Playwright MCP), Chrome DevTools MCP, the harness's own browser |
 | Capture native | A mobile MCP or device agent on an emulator or simulator |
+| Measure native | A tool from the local overlay that scores a capture against a recorded screen; otherwise the reviewer compares by eye |
 | Measure against the mockup | impeccable `comp-diff` (per-region scores) when impeccable is installed; otherwise the reviewer compares by eye from captures of the same size |
 | Design review | impeccable critique when installed; otherwise the reviewer's own checks ([reviewer.md](reviewer.md)) |
 | Tokens and drift | dembrandt when installed; otherwise the tokens file the map names in `design-source:` |
@@ -25,7 +30,7 @@ When `capture` exits 3, capture with the browser MCP your harness has, and keep 
 
 Files saved this way work with `record` and `approve` like the script's own. An MCP that cannot save to a path returns an image: save it under the same name yourself. When the MCP cannot set the width, say which width you captured instead and do not name the file as if it were 360 or 1440.
 
-For a native app, use the device's own screen width in the name (`home-393-light.png`) and capture each state the change affects.
+For a native app, use the device's own screen width in the name (`home-393-light.png`) and capture each state the change affects. When a `Measure native` provider ran, give its report to the reviewer as an input, the way a `comp-diff` report is given.
 
 ## No browser
 

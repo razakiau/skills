@@ -168,6 +168,7 @@ node skills/check-screens/scripts/check-screens.mjs record report
 
 - Node.js 18 or later, and git for `touched`.
 - Playwright is optional. `capture` uses the app's own `playwright` or `@playwright/test` and brings none of its own. Without it, the agent captures with a browser MCP ([`reference/providers.md`](skills/check-screens/reference/providers.md)). With no browser at all, it reports the screen as not checked.
+- Native apps: the agent captures with a mobile MCP or device agent. Tools of your own (a device capture, a scorer against recorded screens) go in `~/.config/check-screens/local.md`, which the skill reads for native apps only and never copies into a repo ([`templates/local.md.example`](skills/check-screens/templates/local.md.example)).
 
 How the reviewer and the trigger were tested: [`eval/seeded-defect.md`](skills/check-screens/eval/seeded-defect.md) and [`eval/trigger.md`](skills/check-screens/eval/trigger.md).
 

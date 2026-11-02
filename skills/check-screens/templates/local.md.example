@@ -1,0 +1,12 @@
+# check-screens local overlay
+
+Copy to ~/.config/check-screens/local.md and edit. check-screens reads it for native apps only, before its own provider table, and never copies it into a repo.
+
+| Need | Provider | How |
+|---|---|---|
+| Capture native | my-device-tool | `my-device-tool snap --out <dir>`, then copy `<dir>/screen.png` to `.check-screens/captures/<screen>-<width>-<theme>.png` |
+| Measure native | my-device-tool score | `my-device-tool score --screen <id> --capture <dir> --json <file>`; give `<file>` to the reviewer |
+
+Notes:
+
+- Which recorded screen id matches which map entry: keep it in the map entry's `design-source:` line.

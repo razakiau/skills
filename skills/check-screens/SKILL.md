@@ -3,7 +3,7 @@ name: check-screens
 description: Load for any task that adds, changes or fixes a screen, page, layout or UI component (features, mobile layout bugs, restyles) or a mockup (record, compare, "does it match"), alongside other skills. It checks the running app before you say done. Skip for backend-only work.
 license: MIT
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # check-screens
@@ -14,7 +14,7 @@ For a dependable trigger, add this line to the repo's AGENTS.md: "After any UI c
 
 ## Setup
 
-`<skill dir>` below is the folder holding this file. Call the script with `node`, exactly as written: `node <skill dir>/scripts/check-screens.mjs map` lists the screens in the map. The script needs Node.js 18 or later. `touched` needs git, and `capture` needs Playwright in the app; without it, use a browser MCP ([reference/providers.md](reference/providers.md)).
+`<skill dir>` below is the folder holding this file. Call the script with `node`, exactly as written: `node <skill dir>/scripts/check-screens.mjs map` lists the screens in the map. The script needs Node.js 18 or later. `touched` needs git, and `capture` needs Playwright in the app; without it, use a browser MCP ([reference/providers.md](reference/providers.md)). For a native app, read `~/.config/check-screens/local.md` first when it exists ([reference/providers.md](reference/providers.md#local-overlay)).
 
 ## The loop
 
@@ -34,8 +34,8 @@ First pick the size of the loop from the table in [reference/loop.md](reference/
 | `map [--json] [<screen> \| --family <family> \| --sibling-of <screen>]` | Prints screen names, one entry, a family or the siblings of a screen | the screen is unknown |
 | `init` | Writes `docs/ui/screens.md` from [templates/screens.md](templates/screens.md) and adds `.check-screens/` to `.gitignore` | the file at that path is not a check-screens map |
 | `capture --url <url> --screen <name> [--widths 360,1440] [--themes light,dark] [--state <s>] [--out .check-screens/captures]` | Writes one PNG per width and theme; exits 3 with no Playwright | the URL fails, or a page is blank or shows an error overlay |
-| `touched [<base>]` | Lists the screens and shared UI files changed since `<base>` (default `HEAD`) | git cannot diff against `<base>`; outside a git repo it exits 2 (`touched needs git`) |
-| `record <screen> [--out .check-screens/captures]` | Writes `last-capture:` with today, the file hash and the variants found | there are no captures, or a `file:` is missing or outside the repo |
+| `touched [<base>]` | Lists the screens and shared UI files changed since `<base>` (default `HEAD`; before the first commit, every file) | `<base>` is not a commit, or git cannot diff; outside a git repo it exits 2 (`touched needs git`) |
+| `record <screen> [--out .check-screens/captures]` | Writes `last-capture:` with today, the file hash and the variants found | there are no captures, a capture is older than the screen's files, or a `file:` is missing or outside the repo |
 | `approve <screen> --by <name> (--mockup <path> \| --captures) [--out .check-screens/captures]` | Records the owner's approval; `--captures` copies to `docs/ui/approved/` | the mockup or the captures are missing |
 | `stale [--routes <file\|->]` | Reports `stale`, `gone` and `unmapped` entries; edits nothing | never for findings; a bad routes file exits 2 |
 

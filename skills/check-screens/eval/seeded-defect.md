@@ -59,8 +59,8 @@ n=0
 for arm in $arms; do
   n=$((n+1))
   cp -R "$E/$arm" "$B/r$n"
-  echo "r$n $arm" >> "$K"
-done
+  echo "r$n $arm"
+done > "$K"
 ```
 
 Do not open `$K` until all six reviewers have replied.
@@ -106,9 +106,24 @@ Recorded before the skill was renamed from ui-check; the reviewer brief was the 
 
 The six runs were blind: each reviewer got a folder named `r1` to `r6`, with the arms shuffled at random. Defect arm: both defects named in 3 of 3. Clean arm: `ship` in 3 of 3. Every defect run measured the gap as about 14 px against 16 px from card positions, and read the tan as off-token from `tokens.css`. No reviewer reported an item the fixtures did not plant.
 
+## Negative control
+
+On 2026-11-02, six more fresh subagents got the same inputs with a weak prompt instead of the brief: the five inputs, "Does it look right?", and the output format (`disposition: ship` or `disposition: fix`, then one `fix` line per problem, or `none`). They had no checks, no tags and no order. They ran on claude-opus-5-5, as a general review agent whose own instructions ask for evidence. The weak runs were not blind: n1 to n3 got the defect arm and n4 to n6 the clean arm, in that order.
+
+| Run | Prompt | Arm | Disposition | Defects named |
+| --- | --- | --- | --- | --- |
+| n1 | weak | defect | fix | tab bar background, card gap |
+| n2 | weak | defect | fix | tab bar background, card gap |
+| n3 | weak | defect | fix | tab bar background, card gap |
+| n4 | weak | clean | ship | none |
+| n5 | weak | clean | ship | none |
+| n6 | weak | clean | ship | none |
+
+The weak prompt scored the same as the brief: both defects named in 3 of 3, `ship` on the clean screen in 3 of 3. On this model, these two defects are too visible to show what the brief adds: a hard-coded colour and a 3 px gap, against a mockup of the same size. The results above show the brief does not hurt detection or raise false `fix` items; they do not show it finds more. The weak clean runs listed what they could not check (dark theme, wider widths, a long list) as prose, where the brief would make them `ask` items or leave them out.
+
 ## Limits
 
-No negative control was run with a weakened reviewer brief, so these runs show that this brief catches these two defects, not that a weaker brief would miss them.
+A harder fixture is needed to tell the brief from a plain prompt: a defect only a sibling shows, a dark-theme-only one, or an overflow with a long real value. Until then, the case for the brief rests on its fixed output, which the loop parses, and its rule that the reviewer edits and renders nothing.
 
 ## Replies
 
