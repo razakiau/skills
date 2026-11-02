@@ -537,6 +537,8 @@ test('doc-check: runs under dash', (t) => {
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.equal(r.stderr, '');
   assert.match(r.stdout, /doc-check: 0 fail, 0 warn\n$/);
+  const ui = shell ? docCheck(docRepo({}, { has_ui: true }), { shell }) : null;
+  if (ui) assert.deepEqual(findings(ui, 'required'), ['doc-check: FAIL required: DESIGN.md', 'doc-check: FAIL required: docs/ui/screens.md']);
 });
 
 // ---- init-files ----
