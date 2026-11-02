@@ -1,6 +1,6 @@
 ---
 name: foundry
-description: Use first when starting a new project, setting a repo up for agents, auditing a repo's agent setup, or asking if it is ready for real users or what is missing before launch. It sets the repo's stage and writes the docs that stage requires. A plain feature or bug request skips it.
+description: Use first, before any brainstorming or planning, when starting a new project, setting a repo up for agents, auditing a repo's agent setup, or asking if it is ready for real users or what is missing before launch. It sets the repo's stage and docs. A plain feature or bug request skips it.
 license: MIT
 metadata:
   version: "1.0.0"
