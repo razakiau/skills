@@ -47,22 +47,40 @@ tokens.css
 
 To refresh the mockup after a change to `home.html` or `tokens.css`, capture `home.html` the same way and copy it to `$D/mockup/home-360-light.png`.
 
+## Blind the folders
+
+The arm name is in the path of `$E/clean` and `$E/defect`, so do not hand those paths to a reviewer. Copy the arms into six neutral folders first, 3 clean and 3 defect, in shuffled order, and keep the key where no reviewer can read it:
+
+```sh
+B=<an empty folder outside the repo, not inside $E>
+K=<a key file outside $B, never shown to a reviewer>
+arms=$(printf 'clean\nclean\nclean\ndefect\ndefect\ndefect\n' | node -e 'const a=require("fs").readFileSync(0,"utf8").trim().split("\n");for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}console.log(a.join(" "))')
+n=0
+for arm in $arms; do
+  n=$((n+1))
+  cp -R "$E/$arm" "$B/r$n"
+  echo "r$n $arm" >> "$K"
+done
+```
+
+Do not open `$K` until all six reviewers have replied.
+
 ## Run
 
-For each run, start a fresh subagent that has seen nothing of this check. Give it the brief from reviewer.md, verbatim, with these inputs, `<arm dir>` being the absolute path of `$E/clean` or `$E/defect`:
+For each folder `r1` to `r6`, start a fresh subagent that has seen nothing of this check. Give it the brief from reviewer.md, verbatim, with these inputs, `<run dir>` being the absolute path of that folder, `$B/r1` to `$B/r6`:
 
 ```text
 - Intent: the home screen lists today's tasks as cards above the tab bar
-- Captures: <arm dir>/home-360-light.png
-- Approved mockup: <arm dir>/mockup/home-360-light.png
-- Sibling captures: <arm dir>/report-360-light.png
-- Design source: <arm dir>/tokens.css
+- Captures: <run dir>/home-360-light.png
+- Approved mockup: <run dir>/mockup/home-360-light.png
+- Sibling captures: <run dir>/report-360-light.png
+- Design source: <run dir>/tokens.css
 - Previous review: none
 ```
 
 Do not tell the reviewer which arm it is in, that defects were planted, or how many. Give it nothing else.
 
-Run each arm 3 times, a fresh subagent each time. Keep each reply as it came.
+That makes 3 runs per arm, a fresh subagent each time. Keep each reply as it came. When all six have replied, open `$K` and match each reply to its arm.
 
 ## Pass
 
@@ -85,3 +103,28 @@ When a run fails, change reviewer.md, rerun all 6 runs, and add the new runs to 
 | 6 | 2026-11-02 | claude-opus-5-5 | 944dc2a | defect | fix | tab bar background, card gap |
 
 The six runs were blind: each reviewer got a folder named `r1` to `r6`, with the arms shuffled at random. Defect arm: both defects named in 3 of 3. Clean arm: `ship` in 3 of 3. Every defect run measured the gap as about 14 px against 16 px from card positions, and read the tan as off-token from `tokens.css`. No reviewer reported an item the fixtures did not plant.
+
+## Replies
+
+The three clean runs (r1, r4, r5) each returned `disposition: ship`, then `none`. The `fix` lines of the three defect runs, as they came:
+
+r2:
+
+```text
+fix tab bar background: saw a tan/beige fill (about #f0d8a8) and no visible top border, expected the white surface with a 1px border on top, as in the mockup and the Report screen. Tan is not one of the colours in tokens.css (tokens.css `.tabs` sets `background: var(--surface)` = #ffffff) (r2/home-360-light.png)
+fix gap between task cards: saw about 14px (cards start at y≈79/178/277/376), expected 16px (mockup cards start at y≈79/181/283/385; Report screen gap matches the mockup). 14px is not on the 4/8/16/24 spacing scale (tokens.css `.cards` `gap: var(--space-3)` = 16px) (r2/home-360-light.png)
+```
+
+r3:
+
+```text
+fix tab bar background: saw a tan/beige fill (about #f0d8a8) and no top border line. Expected the white surface (#ffffff) with a 1px #dde1e7 top border, as in the mockup and the report screen (r3/home-360-light.png; r3/mockup/home-360-light.png; r3/report-360-light.png; tokens.css .tabs, where background is var(--surface) and border-top is 1px solid var(--border)). The tan colour is not one of the design source's colour values.
+fix gap between task cards: saw about 14px between cards (each card starts about 99px below the last). Expected 16px, as in the mockup and the report screen, where each card starts about 102px below the last (r3/home-360-light.png; r3/mockup/home-360-light.png; tokens.css .cards gap: var(--space-3) = 16px). This is a guess from measuring pixels by eye.
+```
+
+r6:
+
+```text
+fix tab bar background: saw a tan/beige fill (#f0d9a8-ish) with no visible top border, expected white surface (#ffffff) with a 1px #dde1e7 top border as in mockup and Report sibling (r6/home-360-light.png, tokens.css .tabs background: var(--surface); border-top)
+fix gap between task cards: saw about 14px (cards start at y≈79, 178, 277, 376, about 85px tall), expected 16px per --space-3, cards at y≈79, 181, 283, 385 as in mockup and Report (r6/home-360-light.png, tokens.css .cards gap: var(--space-3))
+```
