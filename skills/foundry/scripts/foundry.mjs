@@ -313,7 +313,7 @@ const SETTERS = {
     s.has_ui = v === 'true';
   },
   design_md: (s, v) => {
-    if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').includes('..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
+    if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').some((p) => p === '.' || p === '..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
     s.design_md = v;
   },
 };
