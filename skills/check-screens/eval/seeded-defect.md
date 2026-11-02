@@ -123,7 +123,42 @@ The weak prompt scored the same as the brief: both defects named in 3 of 3, `shi
 
 ## Limits
 
-A harder fixture is needed to tell the brief from a plain prompt: a defect only a sibling shows, a dark-theme-only one, or an overflow with a long real value. Until then, the case for the brief rests on its fixed output, which the loop parses, and its rule that the reviewer edits and renders nothing.
+The second fixture below tried the harder cases. It did not separate the two prompts either.
+
+## Second fixture: no mockup, sibling-only and dark-only defects
+
+The first fixture's defects showed against a mockup of the same size. This one takes the mockup away, so each defect shows only against a sibling screen, against one theme, or against a long real value. The screen is `home-tasks.html`; `home-tasks-defect.html` adds three defects in one `<style>` block:
+
+| Element | Defect | Where it shows |
+| --- | --- | --- |
+| header title | `font-size: 18px` | only next to the Report sibling (20px) and in `tokens.css`; the header ends up about 3px shorter |
+| card second line | `color: #5d6573`, the light theme's muted value | only in the dark capture, where it is dimmer than the dark `--muted` |
+| first card title | `white-space: nowrap` on a 24-character parcel number | the title runs off the card; the 360 capture is 387px wide |
+
+`tokens.css` gained `overflow-wrap: anywhere` on `.card h2`, so the clean arm wraps the long value. The home mockup of the first fixture is byte-identical after that change.
+
+Inputs per run: captures `home-360-light.png` and `home-360-dark.png`, siblings `report-360-light.png` and `report-360-dark.png`, the design source `tokens.css`, approved mockup `none`. Capture both arms as in "Prepare the inputs", with `--themes light,dark` and `home-tasks.html` or `home-tasks-defect.html` as the page.
+
+Twelve fresh subagents ran on claude-opus-5-5 on 2026-11-02, all blind: six with the brief from reviewer.md (commit f63a252) in folders `r1` to `r6`, six with the weak prompt of the negative control in folders `w1` to `w6`, each set shuffled on its own.
+
+| Run | Prompt | Arm | Disposition | Defects named as `fix` | Other items |
+| --- | --- | --- | --- | --- | --- |
+| r1 | brief | defect | fix | title overflow, header title, dark second line | card list top spacing (the shorter header) |
+| r2 | brief | clean | ship | none | `ask`: should the wrapped parcel number wrap, truncate or move? |
+| r3 | brief | clean | ship | none | none |
+| r4 | brief | defect | fix | title overflow, header title, dark second line | card list top spacing, "check it again after the header fix" |
+| r5 | brief | clean | ship | none | none |
+| r6 | brief | defect | fix | title overflow, header title, dark second line | card list spacing (the shorter header) |
+| w1 | weak | clean | ship | none | none |
+| w2 | weak | defect | fix | title overflow, header title, dark second line | none |
+| w3 | weak | defect | fix | title overflow, header title, dark second line | none |
+| w4 | weak | defect | fix | title overflow, header title, dark second line | none |
+| w5 | weak | clean | ship | none | none |
+| w6 | weak | clean | ship | none | none |
+
+Both prompts named all three defects in 3 of 3 defect runs and shipped 3 of 3 clean runs. On this model, removing the mockup and moving the defects to a sibling, one theme and one long value still leaves them easy to find. The only differences were in form: the brief's runs kept to the one-line format with evidence files, two of them added a knock-on spacing item caused by the shorter header, and one clean run raised the wrapped value as an `ask` where the weak runs said nothing. The weak runs wrote fixes as code advice (`min-width: 0`, `var(--muted)`), which the brief forbids.
+
+What would separate them is still open: defects a capture shows but a sibling does not contradict (a wrong but consistent spacing on every screen), many screens at once, or a weaker model.
 
 ## Replies
 
