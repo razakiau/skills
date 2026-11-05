@@ -1233,6 +1233,12 @@ test('edited records the repo of each edit tool payload shape, and ignores other
   assert.deepEqual(editedTops(main, s), [wt2]);
   edited({ cwd: main, sessionId: 'nosid-check', toolName: 'run_in_terminal', toolArgs: { command: `echo x > ${wt1}/a.ts` } });
   assert.deepEqual(editedTops(main, 'nosid-check'), [wt1]);
+  // A write naming no worktree lands where it runs; a read there records nothing.
+  const r = 'relative';
+  edited({ cwd: main, session_id: r, tool_name: 'bash', tool_input: { command: 'grep -rn foo src 2>&1 | head' } });
+  assert.equal(editedTops(main, r), null, 'a read with a stderr redirect is not a write');
+  edited({ cwd: main, session_id: r, tool_name: 'bash', tool_input: { command: 'sed -i s/a/b/ src/a.ts' } });
+  assert.deepEqual(editedTops(main, r), [main]);
   assert.deepEqual(edited({ cwd: main, tool_name: 'Edit', tool_input: { file_path: join(wt1, 'a.ts') } }), {}, 'no session id: nothing');
   assert.deepEqual(edited('not json'), {});
 });
@@ -1244,7 +1250,8 @@ test('vendored paths are not measured, and a huge diff gets a one-line note in t
   write(repo, 'vendor/z.go', lines(3));
   write(repo, 'web/dist/bundle.js', lines(3));
   write(repo, 'a.ts', lines(6));
-  assert.deepEqual(audit(repo).files.map((f) => f.path), ['a.ts']);
+  write(repo, 'pkg/build/gen.ts', lines(3));
+  assert.deepEqual(audit(repo).files.map((f) => f.path).sort(), ['a.ts', 'pkg/build/gen.ts']);
 
   const big = makeHookRepo();
   write(big, 'huge.ts', lines(50_001));

@@ -10,11 +10,12 @@ const TEST_RE = [/(^|\/)(__tests__|tests?|e2e|spec)\//, /\.(test|spec)\.[a-z]+$/
 // The code files only, so untracked non-code dumps are never hashed by a snapshot.
 const CODE_SPECS = [...CODE_EXT].map((e) => `:(glob)**/*.${e}`);
 // Installed, vendored or built code is not the agent's: never measured (a renamed
-// `node_modules.root-owned-<date>` the .gitignore misses included).
-const VENDORED = /(^|\/)(node_modules([._-][^/]*)?|vendor|\.pnpm-store|dist|build|\.next|coverage)\//;
+// `node_modules.root-owned-<date>` the .gitignore misses included). `build/` is left out:
+// Go and Gradle projects keep source there.
+const VENDORED = /(^|\/)(node_modules([._-][^/]*)?|vendor|\.pnpm-store|dist|\.next|coverage)\//;
 const vendored = (path) => VENDORED.test(path);
 // The same directories as pathspecs, so a snapshot never hashes their untracked files.
-const VENDORED_SPECS = ['node_modules', 'node_modules[._-]*', 'vendor', '.pnpm-store', 'dist', 'build', '.next', 'coverage']
+const VENDORED_SPECS = ['node_modules', 'node_modules[._-]*', 'vendor', '.pnpm-store', 'dist', '.next', 'coverage']
   .map((d) => `:(exclude,glob)**/${d}/**`);
 
 // These would turn the `:(glob)` pathspecs into literal (or case-folded) ones and hide changes.
@@ -783,6 +784,7 @@ const toolOf = (payload) => [payload.tool_name, payload.toolName].find((v) => ty
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'edit', 'create', 'apply_patch',
   'replace_string_in_file', 'create_file', 'insert_edit_into_file', 'multi_replace_string_in_file']);
 const SHELL_TOOLS = new Set(['bash', 'Bash', 'run_in_terminal', 'powershell']);
+const WRITES = /[^2&]>(?!&)|\b(sed|perl)\s+(-\w+\s+)*-i|\btee\b|\b(mv|cp|rm|touch|patch)\s|\bgit\s+(apply|am|checkout|restore|switch|mv|rm|merge|rebase|cherry-pick|reset|stash\s+pop)\b|--(write|fix)\b|\bcodemod\b|\bjscodeshift\b/;
 const PATH_KEYS = new Set(['file_path', 'path', 'filePath', 'notebook_path']);
 const PATCH_FILE = /^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/gm;
 
@@ -841,10 +843,15 @@ function edited() {
     const args = toolArgs(payload);
     let tops;
     if (EDIT_TOOLS.has(tool)) {
-      tops = editPaths(args).map((p) => repoOf(resolve(cwd, p)));
+      // One git call per directory, not per file: a patch can touch hundreds of files.
+      const dirs = new Set(editPaths(args).map((p) => dirname(resolve(cwd, p))));
+      tops = [...dirs].map((d) => repoOf(join(d, '_')));
     } else {
       const command = typeof args === 'string' ? args : [args.command, args.cmd, args.script].find((v) => typeof v === 'string') ?? '';
       tops = shellTops(command, worktreeTops(own.top)).map((t) => repoPaths(t, { mkdir: false })?.top);
+      // A command naming no worktree works where it runs (`sed -i src/a.ts`): the editor's repo,
+      // only when it looks like a write, or every `ls` would sign the session up for others' edits.
+      if (!tops.length && WRITES.test(command)) tops = [own.top];
     }
     const known = editedTops(own, payload) ?? [];
     const fresh = [...new Set(tops.filter(Boolean))].filter((t) => !known.includes(t));
