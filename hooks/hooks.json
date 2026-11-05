@@ -25,6 +25,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|edit|create|apply_patch|bash|Bash|powershell|replace_string_in_file|create_file|insert_edit_into_file|multi_replace_string_in_file|run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs\" edited",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "ask_user",
         "hooks": [
           {

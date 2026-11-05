@@ -1,14 +1,21 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = new Set('ts tsx js jsx mjs cjs py go rs java kt swift rb php cs vue svelte'.split(' '));
 const TEST_RE = [/(^|\/)(__tests__|tests?|e2e|spec)\//, /\.(test|spec)\.[a-z]+$/, /(^|\/)test_[^/]+\.py$/];
 // The code files only, so untracked non-code dumps are never hashed by a snapshot.
 const CODE_SPECS = [...CODE_EXT].map((e) => `:(glob)**/*.${e}`);
+// Installed, vendored or built code is not the agent's: never measured (a renamed
+// `node_modules.root-owned-<date>` the .gitignore misses included).
+const VENDORED = /(^|\/)(node_modules([._-][^/]*)?|vendor|\.pnpm-store|dist|build|\.next|coverage)\//;
+const vendored = (path) => VENDORED.test(path);
+// The same directories as pathspecs, so a snapshot never hashes their untracked files.
+const VENDORED_SPECS = ['node_modules', 'node_modules[._-]*', 'vendor', '.pnpm-store', 'dist', 'build', '.next', 'coverage']
+  .map((d) => `:(exclude,glob)**/${d}/**`);
 
 // These would turn the `:(glob)` pathspecs into literal (or case-folded) ones and hide changes.
 const PATHSPEC_ENV = ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS'];
@@ -34,7 +41,7 @@ function repoPaths(cwd = process.cwd(), { mkdir = true } = {}) {
   const hash = createHash('sha1').update(top).digest('hex').slice(0, 12);
   const state = join(common, 'strategic-programming', hash);
   if (mkdir) mkdirSync(state, { recursive: true });
-  return { top, state, anchor: `refs/strategic-programming/${hash}` };
+  return { top, common, state, anchor: `refs/strategic-programming/${hash}` };
 }
 
 // A killed run leaves its private index (and lock) behind; any older than a minute goes.
@@ -82,7 +89,7 @@ function codeSnapshot({ top, state }) {
     const env = { ...process.env, GIT_INDEX_FILE: index };
     const update = (input) => git(['update-index', '-z', '--add', '--remove', '--stdin'],
       { cwd: top, env, input, stdio: ['pipe', 'pipe', 'ignore'] });
-    const changed = git(['ls-files', '-z', '-m', '-d', '-o', '--exclude-standard', '--', ...CODE_SPECS], { cwd: top, env });
+    const changed = git(['ls-files', '-z', '-m', '-d', '-o', '--exclude-standard', '--', ...CODE_SPECS, ...VENDORED_SPECS], { cwd: top, env });
     if (changed) update(changed);
     const unmerged = new Set(git(['ls-files', '-z', '-u'], { cwd: top, env }).split('\0').filter(Boolean)
       .map((e) => e.slice(e.indexOf('\t') + 1)));
@@ -191,7 +198,7 @@ function readDiff(top, base, tree) {
     // A rename or copy also keeps its source path, so the export read can see what left it.
     const from = inline === '' ? num[i + 1] : undefined;
     i += inline === '' ? 3 : 1;
-    if (added === '-' || !isCode(path)) continue;
+    if (added === '-' || !isCode(path) || vendored(path)) continue;
     files.push({
       path, added: +added, removed: +removed, test: isTest(path), status: status.get(path), ...(from !== undefined && { from }),
     });
@@ -470,6 +477,10 @@ function mapCovers(entry, path) {
   return new RegExp(`^${re}(/.*)?$`).test(path);
 }
 
+const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
+const MAX_JUDGED_FILES = 2_000;
+const MAX_JUDGED_LINES = 50_000;
+
 function measured(what, fn, fallback) {
   try { return fn(); } catch (err) {
     process.stderr.write(`sp: ${what} not measured: ${String(err.message).split('\n')[0]}\n`);
@@ -479,11 +490,16 @@ function measured(what, fn, fallback) {
 
 // The audit object, its text form, and the snapshot tree it measured (code files only:
 // every measure below reads code paths). `tree` reuses a snapshot the caller just took.
-function buildReport(paths, tree = codeSnapshot(paths)) {
+// `cap` (the hook): a code diff past MAX_JUDGED_FILES or MAX_JUDGED_LINES is not measured
+// further; the report then carries `tooLarge` and only base, files, code and tests.
+function buildReport(paths, tree = codeSnapshot(paths), { cap = false } = {}) {
   const base = findBase(paths);
   const files = readDiff(paths.top, base.ref, tree);
-  const sum = (fs) => fs.reduce((t, f) => ({ added: t.added + f.added, removed: t.removed + f.removed }), { added: 0, removed: 0 });
   const code = files.filter((f) => !f.test);
+  if (cap && (code.length > MAX_JUDGED_FILES || sum(code).added > MAX_JUDGED_LINES)) {
+    const report = { base, files, code: sum(code), tests: sum(files.filter((f) => f.test)), tooLarge: true };
+    return { report, unmeasured: null, tree };
+  }
   const newFiles = code.filter((f) => f.status === 'A').map((f) => f.path);
   const owners = sharedOwners(paths, code.map((f) => f.path));
   // null: the graph was not read, so no change can be proven outside a shared package.
@@ -664,36 +680,74 @@ function readPayload() {
   }
 }
 
-// Every repo the hook judges, each one opted in by a code map at its top (a recorded start is not
-// enough: `start` runs in every repo the skill touches). The payload's own repo (`own: true`), then each other
-// linked worktree of it that has a code map. Editors run hooks in the window's folder, while the
-// work, and the map, often sit in a linked worktree (`git worktree add`).
-function hookRepos(payload) {
-  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
-  const own = repoPaths(cwd, { mkdir: false });
-  if (!own) return [];
+// The payload's own repo (`own: true`) and each other linked worktree of it, each opted in by
+// a code map at its top (a recorded start is not enough: `start` runs in every repo the skill
+// touches). Editors run hooks in the window's folder, while the work, and the map, often sit in
+// a linked worktree (`git worktree add`).
+function worktreeRepos(own) {
   const out = [];
-  const add = (paths, isOwn) => {
-    if (!codeMapPath(paths.top)) return;
-    mkdirSync(paths.state, { recursive: true });
-    out.push({ ...paths, own: isOwn });
-  };
+  const add = (paths, isOwn) => { if (codeMapPath(paths.top)) out.push({ ...paths, own: isOwn }); };
   add(own, true);
-  const list = tryGit(['worktree', 'list', '--porcelain'], { cwd: own.top }) ?? '';
-  for (const line of list.split('\n')) {
-    const dir = line.startsWith('worktree ') ? line.slice(9) : null;
-    if (!dir || resolve(dir) === resolve(own.top) || !codeMapPath(dir)) continue;
+  for (const dir of worktreeTops(own.top)) {
+    if (resolve(dir) === resolve(own.top) || !codeMapPath(dir)) continue;
     const paths = repoPaths(dir, { mkdir: false });
     if (paths && paths.top !== own.top) add(paths, false);
   }
   return out;
 }
 
-// One turn-start record per session (VS Code sends session_id, Copilot CLI sessionId);
-// null without an id: an id-less turn cannot be told apart from another session's.
-function turnFile({ state }, payload) {
+function worktreeTops(top) {
+  const list = tryGit(['worktree', 'list', '--porcelain'], { cwd: top }) ?? '';
+  return list.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9));
+}
+
+// Every repo the hook judges for this session. Several chats often run from one main checkout,
+// each on its own worktree, so a session judges only the repos it edited (the `edited` record,
+// kept for the session's lifetime). Without a record (no session id, or a harness that never
+// sends PostToolUse) only the payload's own repo is judged, never another worktree.
+// Two chats editing the SAME worktree still see each other's edits in the turn diff.
+// `all` (the turn start): every candidate, so a worktree first edited mid-turn has a record.
+function hookRepos(payload, { all = false } = {}) {
+  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+  const own = repoPaths(cwd, { mkdir: false });
+  if (!own) return [];
+  const tops = editedTops(own, payload);
+  const candidates = worktreeRepos(own);
+  const out = all ? candidates : tops === null ? candidates.filter((r) => r.own) : [];
+  for (const top of tops ?? []) {
+    if (out.some((r) => r.top === top) || !codeMapPath(top)) continue;
+    const found = candidates.find((r) => r.top === top);
+    const paths = found ?? (existsSync(top) && repoPaths(top, { mkdir: false }));
+    if (paths && paths.top === top) out.push({ ...paths, own: top === own.top });
+  }
+  for (const r of out) mkdirSync(r.state, { recursive: true });
+  return out;
+}
+
+// The session id (VS Code sends session_id, Copilot CLI sessionId), hashed; null without one.
+function sessionHash(payload) {
   const id = [payload.session_id, payload.sessionId, payload.SessionId].find((v) => typeof v === 'string' && v);
-  return id ? join(state, `turn-${createHash('sha1').update(id).digest('hex').slice(0, 12)}`) : null;
+  return id ? createHash('sha1').update(id).digest('hex').slice(0, 12) : null;
+}
+
+// One turn-start record per session; null without an id: an id-less turn cannot be told
+// apart from another session's.
+function turnFile({ state }, payload) {
+  const hash = sessionHash(payload);
+  return hash ? join(state, `turn-${hash}`) : null;
+}
+
+// The repo tops a session edited, one per line, in the common git dir every worktree shares.
+function editedFile(own, payload) {
+  const hash = sessionHash(payload);
+  return hash ? join(own.common, 'strategic-programming', `edited-${hash}`) : null;
+}
+
+// null: the session has no record (or no id).
+function editedTops(own, payload) {
+  const file = editedFile(own, payload);
+  if (!file) return null;
+  try { return [...new Set(readFileSync(file, 'utf8').split('\n').filter(Boolean))]; } catch { return null; }
 }
 
 function silently(fn) {
@@ -705,7 +759,7 @@ function silently(fn) {
 
 // Records the code snapshot the agent's turn starts from, in every judged repo.
 function recordTurn(payload) {
-  for (const paths of hookRepos(payload)) {
+  for (const paths of hookRepos(payload, { all: true })) {
     const file = turnFile(paths, payload);
     if (file) writeFileSync(file, `${codeSnapshot(paths)}\n`);
   }
@@ -724,6 +778,83 @@ function turn() {
 const ASK_TOOLS = new Set(['ask_user']);
 const toolOf = (payload) => [payload.tool_name, payload.toolName].find((v) => typeof v === 'string') ?? '';
 
+// Tools that write files (Claude Code, Copilot CLI, VS Code), and shell tools: a shell command
+// counts for each worktree whose absolute path it names (never for a bare `cd`-less command).
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'edit', 'create', 'apply_patch',
+  'replace_string_in_file', 'create_file', 'insert_edit_into_file', 'multi_replace_string_in_file']);
+const SHELL_TOOLS = new Set(['bash', 'Bash', 'run_in_terminal', 'powershell']);
+const PATH_KEYS = new Set(['file_path', 'path', 'filePath', 'notebook_path']);
+const PATCH_FILE = /^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/gm;
+
+// The tool's arguments: an object, or a string that is JSON or raw text (an apply_patch body).
+function toolArgs(payload) {
+  const args = payload.tool_input ?? payload.toolInput ?? payload.toolArgs ?? payload.tool_args;
+  if (typeof args !== 'string') return args ?? {};
+  try { return JSON.parse(args); } catch { return args; }
+}
+
+// The file paths an edit tool's arguments name: path keys at any depth, and patch headers.
+function editPaths(args) {
+  const out = [];
+  const walk = (v, key) => {
+    if (typeof v === 'string') {
+      if (PATH_KEYS.has(key)) out.push(v);
+      for (const m of v.matchAll(PATCH_FILE)) out.push((m[1] ?? m[2]).trim());
+    } else if (Array.isArray(v)) v.forEach((x) => walk(x, key));
+    else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, k);
+  };
+  walk(args, null);
+  return out;
+}
+
+// The repo top holding `path`, from its nearest existing directory (a new file's may not exist yet).
+function repoOf(path) {
+  let dir = dirname(path);
+  while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
+  return repoPaths(dir, { mkdir: false })?.top ?? null;
+}
+
+// The worktree tops a shell command names by absolute path. Longest first, each match masked,
+// so `/repo/.worktrees/x/a.ts` names the nested worktree and not `/repo` as well.
+function shellTops(command, tops) {
+  const out = [];
+  let rest = command;
+  for (const top of [...tops].sort((x, y) => y.length - x.length)) {
+    const re = new RegExp(`${top.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[/\\s'"\`;:)&|<>])`, 'g');
+    if (!re.test(rest)) continue;
+    out.push(top);
+    rest = rest.replace(re, '\0');
+  }
+  return out;
+}
+
+// PostToolUse on a file edit: records the edited repo tops for the session. Prints {}.
+function edited() {
+  silently(() => {
+    const payload = readPayload();
+    const tool = payload && toolOf(payload);
+    if (!tool || !(EDIT_TOOLS.has(tool) || SHELL_TOOLS.has(tool))) return null;
+    const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+    const own = repoPaths(cwd, { mkdir: false });
+    const file = own && editedFile(own, payload);
+    if (!file) return null;
+    const args = toolArgs(payload);
+    let tops;
+    if (EDIT_TOOLS.has(tool)) {
+      tops = editPaths(args).map((p) => repoOf(resolve(cwd, p)));
+    } else {
+      const command = typeof args === 'string' ? args : [args.command, args.cmd, args.script].find((v) => typeof v === 'string') ?? '';
+      tops = shellTops(command, worktreeTops(own.top)).map((t) => repoPaths(t, { mkdir: false })?.top);
+    }
+    const known = editedTops(own, payload) ?? [];
+    const fresh = [...new Set(tops.filter(Boolean))].filter((t) => !known.includes(t));
+    if (!fresh.length) return null;
+    mkdirSync(dirname(file), { recursive: true });
+    appendFileSync(file, fresh.map((t) => `${t}\n`).join(''));
+    return null;
+  });
+}
+
 // PostToolUse ask_user: the user's reply starts the next turn. Prints {}.
 function asked() {
   silently(() => {
@@ -732,8 +863,9 @@ function asked() {
   });
 }
 
-// `{ changed, tree }`: whether a non-test, non-generated code file differs between the
-// turn-start tree and `tree` (the code snapshot now); null when the session has no usable record.
+// `{ changed, tree, files }`: the code files (vendored and generated left out) that differ between
+// the turn-start tree and `tree` (the code snapshot now), and whether a non-test one is among them;
+// null when the session has no usable record.
 function turnChangedCode(paths, payload) {
   const file = turnFile(paths, payload);
   if (!file) return null;
@@ -741,40 +873,67 @@ function turnChangedCode(paths, payload) {
   try { from = readFileSync(file, 'utf8').trim(); } catch { return null; }
   if (!/^[0-9a-f]{40,64}$/.test(from) || tryGit(['cat-file', '-e', `${from}^{tree}`], { cwd: paths.top }) === null) return null;
   const tree = codeSnapshot(paths);
-  const code = git(['diff-tree', '-r', '-z', '--no-renames', '--name-only', from, tree], { cwd: paths.top })
-    .split('\0').filter((p) => p && isCode(p) && !isTest(p));
-  const gen = generated(paths.top, code);
-  return { changed: code.some((p) => !gen.has(p)), tree };
+  const files = readDiff(paths.top, from, tree);
+  return { changed: files.some((f) => !f.test), tree, files };
 }
 
 const MAX_HOOK_FILES = 40;
+// With a "this turn:" section first, the whole change lists only this many other files.
+const MAX_HOOK_OTHER_FILES = 15;
+
+// A too-large diff is not listed by blob: its file list alone identifies it.
+function hookFingerprint(top, report, tree) {
+  if (!report.tooLarge) return fingerprint(top, report, tree);
+  const h = createHash('sha1').update(`large\0${report.base.kind === 'start' ? report.base.ref : ''}\0`);
+  for (const f of report.files) h.update(`${f.status}\0${f.path}\0${f.added}\0${f.removed}\0`);
+  return h.digest('hex');
+}
+
+function hookText({ paths, built, turned }) {
+  const r = built.report;
+  const head = paths.own ? '' : `repo: ${paths.top}\n`;
+  if (r.tooLarge) {
+    return `${head}diff too large to judge (${r.files.filter((f) => !f.test).length} files, +${r.code.added}); `
+      + 'check the base or .gitignore\n';
+  }
+  if (!turned) return head + formatText(r, built.unmeasured, { maxFiles: MAX_HOOK_FILES });
+  const t = turned.files;
+  const now = sum(t.filter((f) => !f.test));
+  const tests = sum(t.filter((f) => f.test));
+  return `${head}this turn: code +${now.added} -${now.removed}  tests +${tests.added} -${tests.removed}\n`
+    + t.slice(0, MAX_HOOK_FILES).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}\n`).join('')
+    + (t.length > MAX_HOOK_FILES ? `… and ${t.length - MAX_HOOK_FILES} more\n` : '')
+    + 'whole change:\n'
+    + formatText(r, built.unmeasured, { maxFiles: MAX_HOOK_OTHER_FILES, skip: new Set(t.map((f) => f.path)) });
+}
 
 // The audit text for every judged repo whose code the agent changed this turn, or null. A repo
-// blocks once per distinct code diff. Without a turn record (no session id, or the harness never
-// sent the turn start) only the payload's own repo is judged, on its whole diff since the base;
-// `strict` (the ask_user gate) judges nothing without a record.
+// blocks once per distinct code diff and session. Without a turn record (no session id, or the
+// harness never sent the turn start) only the payload's own repo is judged, on its whole diff
+// since the base; `strict` (the ask_user gate) judges nothing without a record.
 function auditTurn(payload, { strict = false } = {}) {
   const parts = [];
+  const hash = sessionHash(payload);
   for (const paths of hookRepos(payload)) {
     const turned = turnChangedCode(paths, payload);
     if (turned ? !turned.changed : strict || !paths.own) continue;
-    const built = buildReport(paths, turned?.tree);
+    const built = buildReport(paths, turned?.tree, { cap: true });
     if (!built.report.files.some((f) => !f.test)) continue;
-    const print = fingerprint(paths.top, built.report, built.tree);
-    const file = join(paths.state, 'hook-fingerprint');
+    const print = hookFingerprint(paths.top, built.report, built.tree);
+    // Per session: one chat consuming an audit must not hide it from another.
+    const file = join(paths.state, hash ? `hook-fingerprint-${hash}` : 'hook-fingerprint');
     let last = null;
     try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
     if (print === last) continue;
     writeFileSync(file, `${print}\n`);
-    parts.push({ paths, built });
+    parts.push({ paths, built, turned });
   }
   if (!parts.length) return null;
-  const body = parts.map(({ paths, built }) => (paths.own ? '' : `repo: ${paths.top}\n`)
-    + formatText(built.report, built.unmeasured, MAX_HOOK_FILES)).join('\n');
+  const body = parts.map(hookText).join('\n');
   return 'strategic-programming audit (see the strategic-programming skill):\n'
     + `${body}\nAnswer every flag above against your `
     + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
-    + (parts.every(({ built }) => built.report.size === 'small') ? ''
+    + (parts.every(({ built }) => built.report.size === 'small' || built.report.tooLarge) ? ''
       : ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.`);
 }
 
@@ -803,9 +962,11 @@ function ask() {
   });
 }
 
-function formatText(r, unmeasured, maxFiles = Infinity) {
+// `skip`: paths already listed above (the hook's "this turn:" section), left out of the file lines.
+function formatText(r, unmeasured, { maxFiles = Infinity, skip = new Set() } = {}) {
   // TS/JS files give names or "none"; other languages are named as not measured.
   const code = r.files.filter((f) => !f.test);
+  const listed = r.files.filter((f) => !skip.has(f.path));
   const other = [...new Set(code.map((f) => ext(f.path)).filter((e) => !JS_EXT.has(e)))].sort();
   const js = code.some((f) => JS_EXT.has(ext(f.path)));
   const exportsLine = r.exports === null ? 'not measured (error)'
@@ -816,8 +977,8 @@ function formatText(r, unmeasured, maxFiles = Infinity) {
     `size: ${r.size}`,
     `shared: ${r.shared === null ? 'not measured (graph)' : r.shared.length ? r.shared.join(', ') : 'none'}`,
     `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
-    ...r.files.slice(0, maxFiles).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
-    ...(r.files.length > maxFiles ? [`… and ${r.files.length - maxFiles} more (run audit for the full list)`] : []),
+    ...listed.slice(0, maxFiles).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
+    ...(listed.length > maxFiles ? [`… and ${listed.length - maxFiles} more (run audit for the full list)`] : []),
     `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,
     `exports: ${exportsLine}`,
     `tests beside: ${r.testBeside === null ? 'not measured (error)'
@@ -834,8 +995,9 @@ try {
   else if (cmd === 'turn') turn();
   else if (cmd === 'ask') ask();
   else if (cmd === 'asked') asked();
+  else if (cmd === 'edited') edited();
   else {
-    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn | ask | asked\n');
+    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn | ask | asked | edited\n');
     process.exitCode = 2;
   }
 } catch (err) {

@@ -1069,10 +1069,11 @@ function makeWorktreeSetup() {
   return { main, wt };
 }
 
-test('a worktree with a code map is judged when the hook runs from the main checkout', () => {
+test('a worktree with a code map that the session edited is judged when the hook runs from the main checkout', () => {
   const { main, wt } = makeWorktreeSetup();
   assert.deepEqual(turn({ cwd: main, session_id: 's1' }), {});
   write(wt, 'a.ts', lines(6));
+  assert.deepEqual(call('edited', { cwd: main, session_id: 's1', tool_name: 'Edit', tool_input: { file_path: join(wt, 'a.ts') } }), {});
   const out = hook({ cwd: main, session_id: 's1' });
   assert.equal(out.decision, 'block');
   assert.ok(out.reason.includes(`\nrepo: ${wt}\n`), out.reason);
@@ -1102,7 +1103,7 @@ test('ask_user is held once with the audit when the turn changed code', () => {
   assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
   const reason = out.hookSpecificOutput.permissionDecisionReason;
   assert.equal(out.permissionDecisionReason, reason);
-  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nbase: '), reason);
+  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nthis turn: '), reason);
   assert.ok(reason.includes('then call ask_user again'), reason);
   assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' }), {}, 'the same diff passes the second time');
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {}, 'and Stop does not repeat it');
@@ -1141,4 +1142,128 @@ test('the hook reason lists at most 40 files', () => {
   assert.ok(out.reason.includes('… and 5 more (run audit for the full list)'), out.reason);
   const full = run(repo, ['audit']);
   assert.equal(full.stdout.match(/^M f\d+\.ts /gm).length, 45, 'audit itself is not capped');
+});
+
+const edited = (payload) => call('edited', payload);
+const sidHash = (id) => createHash('sha1').update(id).digest('hex').slice(0, 12);
+// The session's edited record lives in the common git dir, shared by every worktree.
+const editedTops = (main, id) => {
+  try {
+    return readFileSync(join(main, '.git', 'strategic-programming', `edited-${sidHash(id)}`), 'utf8').split('\n').filter(Boolean).sort();
+  } catch { return null; }
+};
+
+// Two chats on one main checkout, each on its own worktree with a code map.
+function makeTwoWorktrees() {
+  const { main, wt } = makeWorktreeSetup();
+  const wt2 = realpathSync(mkdtempSync(join(tmpdir(), 'sp-wt2-')));
+  rmSync(wt2, { recursive: true });
+  git(main, 'worktree', 'add', '-q', '-b', 'feat2', wt2);
+  write(wt2, 'docs/code-map.md', MAP['docs/code-map.md']);
+  return { main, wt1: wt, wt2 };
+}
+
+test('another session\'s edit in another worktree is not judged by this session', () => {
+  const { main, wt1, wt2 } = makeTwoWorktrees();
+  turn({ cwd: main, session_id: 'A' });
+  turn({ cwd: main, session_id: 'B' });
+  write(wt2, 'a.ts', lines(6)); // session B's edit
+  assert.deepEqual(hook({ cwd: main, session_id: 'A' }), {}, 'A has no edited record: only its own repo is judged');
+  edited({ cwd: main, session_id: 'A', tool_name: 'Edit', tool_input: { file_path: join(wt1, 'notes.md') } });
+  assert.deepEqual(hook({ cwd: main, session_id: 'A' }), {}, 'A edited wt1 only, and no code there');
+  edited({ cwd: main, session_id: 'B', tool_name: 'Edit', tool_input: { file_path: join(wt2, 'a.ts') } });
+  const b = hook({ cwd: main, session_id: 'B' });
+  assert.equal(b.decision, 'block');
+  assert.ok(b.reason.includes(`repo: ${wt2}\n`), b.reason);
+  assert.ok(!b.reason.includes(`repo: ${wt1}\n`), b.reason);
+});
+
+test('without an edited record only the payload\'s own repo is judged, never other worktrees', () => {
+  const { main, wt } = makeWorktreeSetup();
+  write(main, 'docs/code-map.md', MAP['docs/code-map.md']);
+  turn({ cwd: main, session_id: 's1' });
+  write(main, 'a.ts', lines(7));
+  write(wt, 'a.ts', lines(6));
+  const out = hook({ cwd: main, session_id: 's1' });
+  assert.equal(out.decision, 'block');
+  assert.ok(!out.reason.includes('repo: '), out.reason);
+  assert.match(out.reason, /\nM a\.ts \+2 -0\n/);
+  assert.doesNotMatch(out.reason, /\nM a\.ts \+1 -0\n/);
+});
+
+test('one session blocked on a diff does not hide it from another session', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, session_id: 'A' });
+  turn({ cwd: repo, session_id: 'B' });
+  write(repo, 'a.ts', lines(6));
+  assert.equal(hook({ cwd: repo, session_id: 'A' }).decision, 'block');
+  assert.deepEqual(hook({ cwd: repo, session_id: 'A' }), {}, 'A sees it once');
+  assert.equal(hook({ cwd: repo, session_id: 'B' }).decision, 'block', 'B still gets it');
+  assert.deepEqual(hook({ cwd: repo, session_id: 'B' }), {});
+});
+
+test('edited records the repo of each edit tool payload shape, and ignores other tools', () => {
+  const { main, wt1, wt2 } = makeTwoWorktrees();
+  const id = 'shapes';
+  assert.deepEqual(edited({ cwd: main, session_id: id, tool_name: 'Read', tool_input: { file_path: join(wt1, 'a.ts') } }), {});
+  assert.deepEqual(edited({ cwd: main, session_id: id, tool_name: 'bash', tool_input: { command: 'ls' } }), {});
+  assert.equal(editedTops(main, id), null, 'a read or an unrelated command records nothing');
+  // Claude Code / VS Code: tool_name + tool_input object.
+  edited({ cwd: main, session_id: id, tool_name: 'Write', tool_input: { file_path: join(wt1, 'new/dir/x.ts') } });
+  assert.deepEqual(editedTops(main, id), [wt1]);
+  edited({ cwd: main, session_id: id, tool_name: 'Write', tool_input: { file_path: join(wt1, 'b.ts') } });
+  assert.deepEqual(editedTops(main, id), [wt1], 'one line per repo');
+  // Copilot CLI: toolName + toolArgs as a JSON string.
+  const c = 'copilot';
+  edited({ cwd: main, sessionId: c, toolName: 'edit', toolArgs: JSON.stringify({ path: join(wt2, 'a.ts') }) });
+  assert.deepEqual(editedTops(main, c), [wt2]);
+  // apply_patch: the patch text names the files, absolute or relative to cwd.
+  const p = 'patch';
+  edited({ cwd: wt1, sessionId: p, toolName: 'apply_patch',
+    toolArgs: `*** Begin Patch\n*** Update File: ${join(wt2, 'a.ts')}\n@@\n-x\n+y\n*** Add File: c.ts\n+z\n*** End Patch\n` });
+  assert.deepEqual(editedTops(main, p), [wt1, wt2].sort());
+  // VS Code nested edits.
+  const v = 'vscode';
+  edited({ cwd: main, session_id: v, tool_name: 'multi_replace_string_in_file',
+    tool_input: { replacements: [{ filePath: join(wt2, 'a.ts'), oldString: 'a', newString: 'b' }] } });
+  assert.deepEqual(editedTops(main, v), [wt2]);
+  // A shell command mentioning a worktree path.
+  const s = 'shell';
+  edited({ cwd: main, session_id: s, tool_name: 'Bash', tool_input: { command: `cd ${wt2} && sed -i s/a/b/ a.ts` } });
+  assert.deepEqual(editedTops(main, s), [wt2]);
+  edited({ cwd: main, sessionId: 'nosid-check', toolName: 'run_in_terminal', toolArgs: { command: `echo x > ${wt1}/a.ts` } });
+  assert.deepEqual(editedTops(main, 'nosid-check'), [wt1]);
+  assert.deepEqual(edited({ cwd: main, tool_name: 'Edit', tool_input: { file_path: join(wt1, 'a.ts') } }), {}, 'no session id: nothing');
+  assert.deepEqual(edited('not json'), {});
+});
+
+test('vendored paths are not measured, and a huge diff gets a one-line note in the hook', () => {
+  const repo = makeHookRepo();
+  write(repo, 'apps/x/node_modules.root-owned-2026-10-30/pkg/index.js', lines(30));
+  write(repo, 'node_modules/y/index.js', lines(3));
+  write(repo, 'vendor/z.go', lines(3));
+  write(repo, 'web/dist/bundle.js', lines(3));
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(audit(repo).files.map((f) => f.path), ['a.ts']);
+
+  const big = makeHookRepo();
+  write(big, 'huge.ts', lines(50_001));
+  const out = hook({ cwd: big });
+  assert.equal(out.decision, 'block');
+  assert.ok(out.reason.includes('diff too large to judge (1 files, +50001); check the base or .gitignore'), out.reason);
+  assert.doesNotMatch(out.reason, /\nsize: /);
+});
+
+test('the hook reason leads with what this turn changed', () => {
+  const repo = makeBranchRepo();
+  turn({ cwd: repo, session_id: 's1' });
+  write(repo, 'a.ts', lines(7));
+  const out = hook({ cwd: repo, session_id: 's1' });
+  assert.equal(out.decision, 'block');
+  const body = out.reason.split('\n').slice(1);
+  assert.equal(body[0], 'this turn: code +2 -0  tests +0 -0', out.reason);
+  assert.equal(body[1], 'M a.ts +2 -0', out.reason);
+  assert.ok(body.indexOf('whole change:') > 1, out.reason);
+  assert.equal(out.reason.match(/^M a\.ts /gm).length, 1, 'a file listed in this turn is not listed again');
+  assert.match(out.reason, /\nA b\.ts \+4 -0\n/);
 });
