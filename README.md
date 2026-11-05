@@ -89,7 +89,7 @@ The script decides the size of the change. A **Small** change (one code file, no
 
 ### The end-of-turn hook
 
-With the plugin installed, a hook (`hooks/hooks.json`) audits the agent's own changes in any repository that has a code map: the editor's folder or a linked `git worktree` of it. It acts at the end of a turn, or when the agent calls `ask_user` mid-turn, and only if the agent changed non-test code during that turn. It blocks once per distinct diff, prints the audit and asks the agent to answer every flag. Edits you make yourself between turns pass silently. In a repository without a code map, the hook does nothing.
+With the plugin installed, a hook (`hooks/hooks.json`) audits the agent's own changes in any repository that has a code map: the editor's folder or a linked `git worktree` of it. Each session is judged only on the repositories it edited, so several agents can share one checkout and its worktrees without getting each other's audits. It acts at the end of a turn, or when the agent calls `ask_user` mid-turn, and only if the agent changed non-test code during that turn. It blocks once per distinct diff and session, prints what this turn changed and then the whole change, and asks the agent to answer every flag. Edits you make yourself between turns pass silently. In a repository without a code map, the hook does nothing.
 
 ### Requirements
 
