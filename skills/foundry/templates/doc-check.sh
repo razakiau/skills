@@ -1,5 +1,5 @@
 #!/bin/sh
-# foundry doc-check v1.4.0
+# foundry doc-check v1.4.1
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
 # budget, stage-required files, the precedence sentence, and whether the maps
@@ -330,7 +330,9 @@ check_paths() {
 }
 
 # Each folder directly under a source root (src, lib, app, apps, packages,
-# crates, at the top or one level down) is named somewhere in the code map.
+# crates, at the top or one level down) is named in the code map as a path:
+# `<root>/<name>` or `<name>/`. A bare word does not count: "the map" in prose
+# is not an entry for src/map.
 check_code_map_coverage() {
   map_rel=$(code_map_file)
   map="$root/$map_rel"
@@ -341,11 +343,12 @@ check_code_map_coverage() {
       [ -d "$d" ] || continue
       name=${d%/}
       name=${name##*/}
+      parent=${base##*/}
       case $name in node_modules | target | dist | build | __pycache__ | .*) continue ;; esac
       rel=${d#"$root"/}
       rel=${rel%/}
       if command -v git >/dev/null 2>&1 && git -C "$root" check-ignore -q -- "$rel" 2>/dev/null; then continue; fi
-      if ! grep -Eq "(^|[^A-Za-z0-9_.-])$name([^A-Za-z0-9_-]|\$)" "$map"; then
+      if ! grep -Eq "(^|[^A-Za-z0-9_.-])$name/|$parent/$name([^A-Za-z0-9_-]|\$)" "$map"; then
         finding WARN code-map "$rel is not named in $map_rel"
       fi
     done

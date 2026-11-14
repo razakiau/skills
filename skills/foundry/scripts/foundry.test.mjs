@@ -653,7 +653,8 @@ test('doc-check: a map citing a path that is gone fails; prose only warns; relat
 test('doc-check: a source folder the code map never names warns', () => {
   const r = docCheck(docRepo({
     'src/capture/a.ts': 'x', 'src/style/b.ts': 'x', 'src/node_modules/c.js': 'x', 'ui/src/views/v.ts': 'x',
-    'docs/code-map.md': '# Map\n\n- `src/capture/`: capture\n',
+    'src/kept/k.ts': 'x', 'packages/brand/b.ts': 'x',
+    'docs/code-map.md': '# Map\n\n- `src/capture/`: capture\n- `kept/`: kept\n- `packages/brand`: the name\n\nThe style of this map and its views are not entries.\n',
   }));
   assert.deepEqual(findings(r, 'code-map'), [
     'doc-check: WARN code-map: src/style is not named in docs/code-map.md',
