@@ -625,6 +625,54 @@ test('doc-check: unmigrated still fails link, command, decisions, required', () 
   }
 });
 
+test('doc-check: a map citing a path that is gone fails; prose only warns; relative, ignored, outside and retired paths pass', () => {
+  const r = docCheck(docRepo({
+    'src/harness/proxy.rs': 'x',
+    'web/docs/acceptance/a.md': 'x',
+    '.gitignore': 'data/\n',
+    'data/.keep': null,
+    'docs/code-map.md': [
+      '# Map', '',
+      '| `src/harness/` | sidecar, see `harness/proxy.rs` |',
+      '| `docs/acceptance/` | acceptance notes, under web/ |',
+      '| `src/gone.ts` | was here |',
+      'Image `ghcr.io/x/y`, secrets in `run/secrets`, db at `data/app.db`, glob `src/*.rs`, cmd `npm run x`.',
+      'Retired 2026-01-01 and deleted with `src/old.ts`.',
+      '```sh', 'cat src/fenced.ts', '```', '',
+    ].join('\n'),
+    'AGENTS.md': AGENTS_OK + '\nSee `src/missing.md` and `docs/elsewhere.md`.\n',
+  }));
+  assert.deepEqual(findings(r, 'path'), [
+    'doc-check: FAIL path: docs/code-map.md cites src/gone.ts, which does not exist',
+    'doc-check: WARN path: AGENTS.md cites docs/elsewhere.md, which does not exist',
+    'doc-check: WARN path: AGENTS.md cites src/missing.md, which does not exist',
+  ]);
+  assert.equal(r.code, 1);
+});
+
+test('doc-check: a source folder the code map never names warns', () => {
+  const r = docCheck(docRepo({
+    'src/capture/a.ts': 'x', 'src/style/b.ts': 'x', 'src/node_modules/c.js': 'x', 'ui/src/views/v.ts': 'x',
+    'docs/code-map.md': '# Map\n\n- `src/capture/`: capture\n',
+  }));
+  assert.deepEqual(findings(r, 'code-map'), [
+    'doc-check: WARN code-map: src/style is not named in docs/code-map.md',
+    'doc-check: WARN code-map: ui/src/views is not named in docs/code-map.md',
+  ]);
+  assert.equal(r.code, 0);
+});
+
+test('doc-check: more than 50 commits since the last garden pass, or since the stage was set, warns', () => {
+  const repo = docRepo({}, { stage_set: '2000-01-01' });
+  for (let i = 0; i < 50; i++) git(repo, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  assert.deepEqual(findings(docCheck(repo), 'garden'), ['doc-check: WARN garden: 51 commits since the stage was set (2000-01-01), with no garden pass yet; run foundry garden']);
+  const head = git(repo, 'rev-parse', 'HEAD');
+  write(repo, '.agents/foundry.json', JSON.stringify(docState({ stage_set: '2000-01-01', garden_last: head }), null, 2) + '\n');
+  assert.deepEqual(findings(docCheck(repo), 'garden'), [], 'a pass at HEAD');
+  const young = docRepo({}, { stage_set: '2000-01-01' });
+  assert.deepEqual(findings(docCheck(young), 'garden'), []);
+});
+
 test('doc-check: runs under dash', (t) => {
   const shell = ['/bin/dash', '/usr/bin/dash'].find((p) => existsSync(p));
   const busybox = !shell && spawnSync('busybox', ['sh', '-c', 'true']).status === 0;

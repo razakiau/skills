@@ -2,7 +2,9 @@
 # foundry doc-check v1.4.0
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
-# budget, stage-required files and the precedence sentence.
+# budget, stage-required files, the precedence sentence, and whether the maps
+# still match the code: cited paths exist, source folders are named, and the
+# last garden pass is not too far back.
 # Usage: sh .agents/doc-check.sh [repo_root]
 # Prints "doc-check: FAIL|WARN <rule>: <detail>" per finding, then a summary.
 # Exits 1 if any FAIL, else 0. Needs only sh, grep, sed, find and awk.
@@ -252,8 +254,131 @@ check_required() {
   done
 }
 
+# Inline code spans outside fenced blocks, one per line. A line that says a
+# file is gone (deleted, removed, retired, renamed, moved) cites it on purpose.
+code_spans() {
+  awk '
+    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+    fence { next }
+    tolower($0) ~ /(delet|remov|retir|renam|moved|replaced)/ { next }
+    {
+      line = $0
+      while (match(line, /`[^`]+`/)) {
+        print substr(line, RSTART + 1, RLENGTH - 2)
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  ' "$1"
+}
+
+# A span is a repo path when it has no spaces, globs or variables, contains a
+# slash or ends in a file extension, and its first part exists at the top: so
+# ghcr.io/x, run/secrets or another repo's docs/foo.md in a repo without docs/
+# are left alone. Gitignored paths (.env.local, data/app.db) are skipped.
+repo_path() {
+  p=${1#./}
+  case $p in
+    '' | *' '* | *'*'* | *'?'* | *'$'* | *'{'* | *'<'* | *'~'* | *:* | -* | /* | *..*) return 1 ;;
+    */* | *.md | *.ts | *.tsx | *.js | *.mjs | *.py | *.rs | *.go | *.sh | *.sql | *.json | *.toml | *.yml | *.yaml) ;;
+    *) return 1 ;;
+  esac
+  first=${p%%/*}
+  [ "$first" = "$p" ] && first=$p
+  [ -e "$root/$first" ] || return 1
+  if command -v git >/dev/null 2>&1 && git -C "$root" check-ignore -q -- "$p" 2>/dev/null; then return 1; fi
+  echo "$p"
+}
+
+# A path a doc cites that no longer exists. In the maps (code map, screen
+# map) it is a FAIL: they exist to say where things are. In prose, a WARN.
+# Every tracked path and its folders, for a path cited relative to a subfolder
+# (harness/proxy.rs for src/harness/proxy.rs).
+all_paths() {
+  if command -v git >/dev/null 2>&1 && git -C "$root" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    git -C "$root" ls-files
+  else
+    (cd "$root" && find . -path ./.git -prune -o -type f -print | sed 's|^\./||')
+  fi | awk -F/ '{ p = ""; for (i = 1; i <= NF; i++) { p = (i == 1 ? $1 : p "/" $i); print p } }' | sort -u
+}
+
+# The code map where it is: the recorded path, or the old .agents/code-map.md.
+code_map_file() {
+  m=$(recorded docs/code-map.md)
+  if [ ! -f "$root/$m" ] && [ -f "$root/.agents/code-map.md" ]; then m=.agents/code-map.md; fi
+  echo "$m"
+}
+
+check_paths() {
+  known=$(all_paths)
+  map=$(code_map_file)
+  for doc in "$map" "$(recorded docs/ui/screens.md)" AGENTS.md "$(recorded ARCHITECTURE.md)"; do
+    [ -f "$root/$doc" ] || continue
+    case $doc in
+      "$map" | "$(recorded docs/ui/screens.md)") level=FAIL ;;
+      *) level=WARN ;;
+    esac
+    code_spans "$root/$doc" | sort -u | while IFS= read -r span; do
+      p=$(repo_path "$span") || continue
+      p=${p%/}
+      [ -e "$root/$p" ] && continue
+      # The old code map place already has its own warning.
+      [ "$p" = docs/code-map.md ] && [ "$map" = .agents/code-map.md ] && continue
+      if printf '%s\n' "$known" | grep -q -- "/$p\$"; then continue; fi
+      finding "$level" path "$doc cites $p, which does not exist"
+    done
+  done
+}
+
+# Each folder directly under a source root (src, lib, app, apps, packages,
+# crates, at the top or one level down) is named somewhere in the code map.
+check_code_map_coverage() {
+  map_rel=$(code_map_file)
+  map="$root/$map_rel"
+  [ -f "$map" ] || return 0
+  for base in "$root"/src "$root"/lib "$root"/app "$root"/apps "$root"/packages "$root"/crates "$root"/*/src; do
+    [ -d "$base" ] || continue
+    for d in "$base"/*/; do
+      [ -d "$d" ] || continue
+      name=${d%/}
+      name=${name##*/}
+      case $name in node_modules | target | dist | build | __pycache__ | .*) continue ;; esac
+      rel=${d#"$root"/}
+      rel=${rel%/}
+      if command -v git >/dev/null 2>&1 && git -C "$root" check-ignore -q -- "$rel" 2>/dev/null; then continue; fi
+      if ! grep -Eq "(^|[^A-Za-z0-9_.-])$name([^A-Za-z0-9_-]|\$)" "$map"; then
+        finding WARN code-map "$rel is not named in $map_rel"
+      fi
+    done
+  done
+}
+
+# Too many commits since the last garden pass (or since the stage was set,
+# before the first pass) means drift is piling up unread.
+GARDEN_WARN=50
+check_garden() {
+  [ "$stage" != explore ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "$root" rev-parse -q --verify HEAD >/dev/null 2>&1 || return 0
+  last=$(state_value garden_last)
+  if [ -n "$last" ] && [ "$last" != null ] && git -C "$root" rev-parse -q --verify "$last^{commit}" >/dev/null 2>&1; then
+    n=$(git -C "$root" rev-list --count "$last..HEAD")
+    since="the last garden pass ($(printf '%.7s' "$last"))"
+  else
+    set_on=$(state_value stage_set)
+    [ -n "$set_on" ] || return 0
+    n=$(git -C "$root" rev-list --count --since="$set_on" HEAD)
+    since="the stage was set ($set_on), with no garden pass yet"
+  fi
+  if [ "$n" -gt "$GARDEN_WARN" ]; then
+    finding WARN garden "$n commits since $since; run foundry garden"
+  fi
+}
+
 run_checks() {
   check_required
+  check_paths
+  check_code_map_coverage
+  check_garden
   check_links
   check_commands
   check_decisions

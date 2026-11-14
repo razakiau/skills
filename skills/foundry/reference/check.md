@@ -31,6 +31,8 @@ For each FAIL, name the file that owns the fix:
 - `decisions`: `docs/decisions/index.md`.
 - `required`: the missing file itself. When a provider owns it, as with `DESIGN.md` or `docs/code-map.md`, name the queued interview. A missing `docs/ui/screens.md` is fixed by `node <check-screens dir>/scripts/check-screens.mjs init` (the folder holding check-screens' SKILL.md) when check-screens is installed, else by grow.
 - `state`: `.agents/foundry.json`.
+- `path`: the doc named first. A FAIL comes from a map (the code map, the screen map) citing a path that no longer exists; a WARN, from prose. Fix the citation to where the code lives now, or drop it. A line that says the file was deleted, renamed or moved is not checked.
+- `code-map` (WARN): the code map, which should name that folder. `garden` (WARN): run the garden command in [garden.md](garden.md).
 - `budget` or `precedence`: AGENTS.md. A WARN there means `agents_md.state` is `unmigrated`; migrate it as in [init.md](init.md).
 - A build, lint or test failure: the source file it names.
 
