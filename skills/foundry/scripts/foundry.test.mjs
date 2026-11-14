@@ -343,10 +343,10 @@ test('signals: packaging is not deploying, and only a hosted or live link in the
   assert.deepEqual(s.packaged, ['.github/workflows/image.yml', 'compose.yaml', 'Dockerfile']);
   assert.ok(s.reasons.includes('packaged, not a deploy: Dockerfile'), s.reasons.join('; '));
   assert.equal(s.proposed, 'explore');
-  const hosted = signals(makeRepo({ 'README.md': 'Try it: https://ett-pilot.vercel.app\n' }), NO_SESSIONS);
-  assert.deepEqual(hosted.deployed, ['README.md: https://ett-pilot.vercel.app']);
-  const said = signals(makeRepo({ 'README.md': 'Docs: https://docs.rs/x\nThe live app is at https://kerdo.acme.net/app\n' }), NO_SESSIONS);
-  assert.deepEqual(said.deployed, ['README.md: https://kerdo.acme.net/app'], 'a line that says live');
+  const hosted = signals(makeRepo({ 'README.md': 'Try it: https://notes-pilot.vercel.app\n' }), NO_SESSIONS);
+  assert.deepEqual(hosted.deployed, ['README.md: https://notes-pilot.vercel.app']);
+  const said = signals(makeRepo({ 'README.md': 'Docs: https://docs.rs/x\nThe live app is at https://tracker.acme.net/app\n' }), NO_SESSIONS);
+  assert.deepEqual(said.deployed, ['README.md: https://tracker.acme.net/app'], 'a line that says live');
   const users = makeRepo({ 'README.md': 'The live app: https://app.acme.io\nBuilt for our users.\n' });
   const u = signals(users, NO_SESSIONS);
   assert.equal(u.proposed, 'live');
@@ -1613,7 +1613,7 @@ test('skill: description ≤ 300 chars and names start/audit/ready', () => {
   const fm = frontmatter(readFileSync(SKILL, 'utf8'));
   assert.equal(fm.name, 'foundry');
   assert.equal(fm.license, 'MIT');
-  assert.equal(fm['metadata.version'], '1.1.0');
+  assert.equal(fm['metadata.version'], '1.2.0');
   assert.ok(fm.description.length <= 300, `description has ${fm.description.length} chars`);
   for (const re of [/project/, /audit/, /ready/]) assert.match(fm.description, re);
   assert.match(fm.description, /feature|bug/, 'says what skips it');
