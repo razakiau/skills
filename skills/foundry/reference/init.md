@@ -35,7 +35,7 @@ Each entry is `{"interview": ..., "when": ..., "provider": ..., "done": false}`.
 - product: `design brief and DESIGN.md`, when `before the first screen`, only with UI. Provider: Impeccable `init` and `document`, else the fallback questions. The screen map, `docs/ui/screens.md`, needs no interview: `init-files` writes it at product with UI, and check-screens fills it in as screens are built.
 - product: `code map`, when `at the first change that touches two modules`. Provider: strategic-programming, else its `reference/code-map.md` template.
 - product: `glossary`, when `when a second domain term is disputed, or at the first decision`.
-- product: `quality bar`, when `before the first PR at product`.
+- product: `quality bar`, when `before the first PR at product`. Provider: constraint-driven-development, else `templates/CONSTRAINTS.md`. Either way, propose the structure rungs in [ladder.md](ladder.md), with numbers measured on the code as it is.
 - product: `spec template`, when `at the first change bigger than a day`. Provider: writing-plans, else ask the owner.
 - live: `threat model`, when `on entering live`.
 - live: `change notes and release`, when `on entering live`. Provider: changesets or release-please, else ask the owner.

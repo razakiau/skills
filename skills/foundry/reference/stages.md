@@ -38,8 +38,8 @@ It adds:
 - ARCHITECTURE.md plus the code map.
 - DESIGN.md before the first screen is built. It may live below the top, such as `web/DESIGN.md`: record the path with `state --set design_md=<path>`, and every check reads it there. Any required doc can live elsewhere the same way (`product_md`, `decisions_index`, `glossary_md`, `architecture_md`, `code_map`, `screens_md`, `constraints_md`, `threat_model`, `runbooks_dir`).
 - With UI, a screen map in `docs/ui/screens.md`: each screen, its approved mockup and when it was last checked. check-screens keeps it true; AGENTS.md gets the line "After any UI change, run check-screens before reporting done."
-- CONSTRAINTS.md, the quality bar.
-- One `check` command that runs the build, lint, tests and the doc check. It gates commits: the plugin's commit hook refuses an agent's commit until `foundry.mjs gate` has passed on the same files. CI runs the same command on every PR; that is the gate nobody can skip.
+- CONSTRAINTS.md, the quality bar, including the structure rungs from [ladder.md](ladder.md).
+- One `check` command that runs the build, the rungs of [ladder.md](ladder.md) and the doc check. It gates commits: the plugin's commit hook refuses an agent's commit until `foundry.mjs gate` has passed on the same files. CI runs the same command on every PR; that is the gate nobody can skip.
 - A "how to verify" section in AGENTS.md. It names the command that starts the app and the tool an agent uses to check it (browser, mobile, HTTP).
 - A security pass in review. The reviewer of each change also reads it for access control, input handling and secrets, using the security provider when one is installed.
 - A short spec for any change bigger than a day, kept next to the code, before the work starts.

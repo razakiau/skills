@@ -1230,7 +1230,7 @@ test('refs: readiness.md has three tiers checked by script, test or review', () 
   for (const r of tables.flat()) assert.match(r[1], /^(script|test|review)\b/, `${r[0]}: ${r[1]}`);
 });
 
-const KNOWLEDGE_REFS = ['providers.md', 'readiness.md', 'stages.md', 'themes.md'];
+const KNOWLEDGE_REFS = ['ladder.md', 'providers.md', 'readiness.md', 'stages.md', 'themes.md'];
 const COMMAND_REFS = ['routing.md', 'init.md', 'audit.md', 'grow.md', 'providers-cmd.md', 'check.md', 'garden.md', 'tune.md'];
 
 test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.md names a real command', () => {

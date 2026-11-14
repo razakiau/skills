@@ -27,7 +27,8 @@ Done: every open theme has one of the three, with its evidence.
 ### 4. Find prose rules a script could check
 
 Read CONSTRAINTS.md and AGENTS.md. List each rule written as prose that a script, a lint rule or a test could check, such as "no file over 400 lines". For each, propose the check and where it would run.
-Done: each such rule is listed with its proposed check, or you said there are none.
+From `product` on, also read the check command and list each rung of [ladder.md](ladder.md) it does not run for the repo's languages, with the tool you would add.
+Done: each such rule is listed with its proposed check, or you said there are none, and each missing rung is named.
 
 ### 5. Report readiness gaps
 

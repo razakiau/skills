@@ -9,7 +9,7 @@ metadata:
 # Foundry
 
 A repo grows through four stages: `explore`, `product`, `live` and `scale` ([reference/stages.md](reference/stages.md)). Each stage requires its own files, from AGENTS.md at the start to a threat model and runbooks once real users arrive.
-Foundry records the stage in `.agents/foundry.json`, writes what the stage lacks, maps each kind of work ([reference/themes.md](reference/themes.md)) to a provider the agent already has ([reference/providers.md](reference/providers.md)), and audits the repo against the readiness list ([reference/readiness.md](reference/readiness.md)).
+Foundry records the stage in `.agents/foundry.json`, writes what the stage lacks, maps each kind of work ([reference/themes.md](reference/themes.md)) to a provider the agent already has ([reference/providers.md](reference/providers.md)), audits the repo against the readiness list ([reference/readiness.md](reference/readiness.md)), and grows the check rung by rung ([reference/ladder.md](reference/ladder.md)).
 It proposes; the owner decides. Nothing in AGENTS.md or CI changes without the owner's yes.
 
 ## Setup
