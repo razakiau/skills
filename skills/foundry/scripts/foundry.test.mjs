@@ -1487,6 +1487,62 @@ test('garden-range: fewer than 50 commits starts at the root; errors', () => {
   assert.deepEqual([bad.stderr, bad.code], ['foundry: unknown argument --x\n', 2]);
 });
 
+// A repo with a bare origin: main pushed, then a feature branch two commits ahead of it.
+function withOrigin({ setHead = true, branch = 'main' } = {}) {
+  const repo = withState();
+  if (branch !== 'main') git(repo, 'branch', '-m', branch);
+  commitN(repo, 2);
+  const origin = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-origin-')));
+  git(origin, 'init', '-q', '--bare');
+  git(repo, 'remote', 'add', 'origin', origin);
+  git(repo, 'push', '-q', 'origin', branch);
+  if (setHead) git(repo, 'remote', 'set-head', 'origin', branch);
+  const mainHead = git(repo, 'rev-parse', 'HEAD');
+  git(repo, 'checkout', '-q', '-b', 'feature');
+  write(repo, 'f.txt', 'a\n');
+  git(repo, 'add', 'f.txt');
+  git(repo, 'commit', '-q', '-m', 'f1');
+  write(repo, 'f.txt', 'b\n');
+  git(repo, 'commit', '-qam', 'f2');
+  return { repo, mainHead, feature: git(repo, 'rev-parse', 'HEAD') };
+}
+
+test('garden-range --mark on a feature branch records the commit it shares with origin/HEAD', () => {
+  const { repo, mainHead, feature } = withOrigin();
+  const m = run(repo, ['garden-range', '--mark']);
+  assert.equal(m.code, 0, m.stderr);
+  assert.match(m.stdout, new RegExp(`\\ngarden_last: ${mainHead} \\(the newest commit of HEAD also on origin/main; the commits after it are not on origin/main yet\\)\\n$`));
+  assert.equal(readState(repo).garden_last, mainHead);
+  assert.notEqual(mainHead, feature);
+  // Squash-merge the branch on main: the feature commits never reach main, and the next pass still works.
+  git(repo, 'checkout', '-q', 'main');
+  git(repo, 'merge', '-q', '--squash', 'feature');
+  git(repo, 'commit', '-qm', 'feature (squashed)');
+  assert.deepEqual(gardenRange(repo), { from: mainHead, to: git(repo, 'rev-parse', 'HEAD'), commits: 1 });
+  // On main itself HEAD is on origin/main once pushed: --mark records HEAD and says nothing more.
+  git(repo, 'push', '-q', 'origin', 'main');
+  const head = git(repo, 'rev-parse', 'HEAD');
+  const again = run(repo, ['garden-range', '--mark']);
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stdout, new RegExp(`\\ngarden_last: ${head}\\n$`));
+  assert.equal(readState(repo).garden_last, head);
+});
+
+test('garden-range --mark falls back to origin/main, then origin/master, then HEAD', () => {
+  for (const branch of ['main', 'master']) {
+    const { repo, mainHead } = withOrigin({ setHead: false, branch });
+    const m = run(repo, ['garden-range', '--mark', '--json']);
+    assert.equal(m.code, 0, m.stderr);
+    assert.equal(readState(repo).garden_last, mainHead, branch);
+    assert.match(m.stderr, new RegExp(`^garden_last: ${mainHead} \\(.*origin/${branch}`), branch);
+    assert.equal(JSON.parse(m.stdout).to, git(repo, 'rev-parse', 'HEAD'), 'the JSON stays the range alone');
+  }
+  const { repo } = withOrigin();
+  git(repo, 'remote', 'remove', 'origin');
+  assert.equal(run(repo, ['garden-range', '--mark']).code, 0);
+  assert.equal(readState(repo).garden_last, git(repo, 'rev-parse', 'HEAD'), 'no remote: HEAD');
+});
+
 // ---- hook, SKILL.md and packaging ----
 
 const HOOK_LINE = /^foundry: \d+ missing for product \(.+\), \d+ interview\(s\) queued; run foundry to see them\.\n$/;
@@ -1614,7 +1670,7 @@ test('skill: description ≤ 300 chars and names start/audit/ready', () => {
   const fm = frontmatter(readFileSync(SKILL, 'utf8'));
   assert.equal(fm.name, 'foundry');
   assert.equal(fm.license, 'MIT');
-  assert.equal(fm['metadata.version'], '1.2.0');
+  assert.equal(fm['metadata.version'], '1.2.1');
   assert.ok(fm.description.length <= 300, `description has ${fm.description.length} chars`);
   for (const re of [/project/, /audit/, /ready/]) assert.match(fm.description, re);
   assert.match(fm.description, /feature|bug/, 'says what skips it');

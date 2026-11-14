@@ -812,6 +812,28 @@ export function gardenRange(top) {
   return { from, to, commits };
 }
 
+// The remote default branch: origin/HEAD, else origin/main, else origin/master; null without one.
+function remoteDefault(top) {
+  const head = gitOut(top, ['symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD']);
+  if (head && gitOut(top, ['rev-parse', '--verify', '-q', `${head}^{commit}`])) return head;
+  for (const ref of ['origin/main', 'origin/master']) {
+    if (gitOut(top, ['rev-parse', '--verify', '-q', `refs/remotes/${ref}^{commit}`])) return ref;
+  }
+  return null;
+}
+
+// The commit --mark records: the newest commit of HEAD's history that is also on the remote default
+// branch (their merge-base), so a feature branch that is later squash-merged leaves a garden_last that
+// main still has. HEAD when there is no remote default branch. `why` is null when the commit is HEAD.
+export function gardenMark(top, to) {
+  const base = remoteDefault(top);
+  if (!base) return { commit: to, why: null };
+  const mb = gitOut(top, ['merge-base', to, base]);
+  if (!mb) return { commit: to, why: `HEAD shares no history with ${base}` };
+  if (mb === to) return { commit: to, why: null };
+  return { commit: mb, why: `the newest commit of HEAD also on ${base}; the commits after it are not on ${base} yet` };
+}
+
 function gardenRangeCmd(args) {
   for (const a of args) if (a !== '--mark' && a !== '--json') throw new FoundryError(`unknown argument ${a}`, 2);
   const top = repoTop();
@@ -824,8 +846,11 @@ function gardenRangeCmd(args) {
   if (args.includes('--json')) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
   else process.stdout.write(`garden-range: ${r.from}..${r.to} (${r.commits} commits)\n`);
   if (current) {
-    writeState(top, { ...current, garden_last: r.to });
-    if (!args.includes('--json')) process.stdout.write(`garden_last: ${r.to}\n`);
+    const mark = gardenMark(top, r.to);
+    writeState(top, { ...current, garden_last: mark.commit });
+    const line = `garden_last: ${mark.commit}${mark.why ? ` (${mark.why})` : ''}\n`;
+    if (!args.includes('--json')) process.stdout.write(line);
+    else if (mark.why) process.stderr.write(line);
   }
 }
 
