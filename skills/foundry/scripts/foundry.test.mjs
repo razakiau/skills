@@ -1643,7 +1643,7 @@ test('hooks.json is valid JSON, keeps the strategic-programming hooks and carrie
   }
   assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: fd('hook'), timeout: 10 }] }]);
   const gate = hooks.PreToolUse.find((m) => m.hooks.some((h) => h.command === fd('commit-hook')));
-  assert.deepEqual(gate, { matcher: 'bash|Bash|run_in_terminal|powershell', hooks: [{ type: 'command', command: fd('commit-hook'), timeout: 30 }] });
+  assert.deepEqual(gate, { matcher: 'bash|Bash|run_in_terminal|powershell|shell', hooks: [{ type: 'command', command: fd('commit-hook'), timeout: 30 }] });
 });
 
 test('packaging: README and plugin descriptions name all three skills', () => {
@@ -1702,7 +1702,10 @@ test('gate: which commands and repos it applies to', () => {
   for (const cmd of [`cd ${repo} && git commit -m x`, `git -C ${repo} commit --amend --no-edit`, `cd "${repo}"; git add -A; git -c core.x=y commit -qm "y"`]) {
     assert.ok(foundry.gateReason(copilotCommit(elsewhere, cmd)), cmd);
   }
-  for (const cmd of ['git log --oneline', 'git commit-tree HEAD^{tree}', 'echo git commit', `git -C ${repo} status`]) {
+  for (const cmd of ['GIT_AUTHOR_NAME=a git commit -m x', 'env X=1 git commit -m x', 'sudo git commit -m x', 'git commit -m "a; b"']) {
+    assert.ok(foundry.gateReason(copilotCommit(repo, cmd)), cmd);
+  }
+  for (const cmd of ['git log --oneline', 'git commit-tree HEAD^{tree}', 'echo git commit', `git -C ${repo} status`, 'echo "a; git commit"', "echo 'x && git commit'"]) {
     assert.equal(foundry.gateReason(copilotCommit(repo, cmd)), null, cmd);
   }
   assert.ok(foundry.gateReason({ tool_name: 'Bash', tool_input: { command: 'git commit -m x' }, cwd: repo }), 'Claude Code payload');

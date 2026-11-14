@@ -959,8 +959,10 @@ function gateCmd(args) {
 }
 
 const SHELLS = new Set(['bash', 'Bash', 'run_in_terminal', 'powershell', 'shell']);
-// `git commit` in command position: at the start, or after ; & | ( or a newline. Not commit-tree, not `echo git commit`.
-const GIT_COMMIT = /(^|[;&|(\n])\s*git(\s+-C\s+("[^"]+"|'[^']+'|\S+)|\s+-c\s+\S+|\s+--no-pager)*\s+commit(?![\w-])/;
+// `git commit` in command position: at the start, or after ; & | ( or a newline, past any VAR=x assignments and
+// env/command/sudo/exec/nohup/time wrappers. Not commit-tree, not `echo git commit`. Best effort: aliases and
+// `bash -c "..."` get through, which is why CI runs the check too.
+const GIT_COMMIT = /(^|[;&|(\n])\s*(?:(?:\w+=\S*|env|command|sudo|exec|nohup|time)\s+)*git(\s+-C\s+("[^"]+"|'[^']+'|\S+)|\s+-c\s+\S+|\s+--no-pager)*\s+commit(?![\w-])/;
 
 // The shell commands of a PreToolUse payload: Claude Code's tool_input, Copilot's toolArgs (an object or JSON text).
 export function shellCommands(payload) {
@@ -977,6 +979,9 @@ export function shellCommands(payload) {
   return out;
 }
 
+// Quoted text is data, not a command: `echo "a; git commit"` commits nothing.
+const unquoted = (command) => command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+
 // The folder a commit command runs in: its `git -C <dir>`, else a leading `cd <dir>`, else the payload cwd.
 export function commitDir(command, cwd) {
   const unq = (s) => s.replace(/^["']|["']$/g, '');
@@ -991,7 +996,7 @@ export function commitDir(command, cwd) {
 export function gateReason(payload, self = fileURLToPath(import.meta.url)) {
   const cwd = typeof payload?.cwd === 'string' && existsSync(payload.cwd) ? payload.cwd : process.cwd();
   for (const command of shellCommands(payload)) {
-    if (!GIT_COMMIT.test(command)) continue;
+    if (!GIT_COMMIT.test(unquoted(command))) continue;
     const dir = commitDir(command, cwd);
     if (!existsSync(dir)) continue;
     const top = repoTop(dir);

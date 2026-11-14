@@ -23,7 +23,7 @@
         ]
       },
       {
-        "matcher": "bash|Bash|run_in_terminal|powershell",
+        "matcher": "bash|Bash|run_in_terminal|powershell|shell",
         "hooks": [
           {
             "type": "command",
