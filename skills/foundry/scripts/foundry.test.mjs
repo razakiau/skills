@@ -316,7 +316,7 @@ test('signals: age and PRODUCT.md propose product', () => {
 
 test('signals: deploy workflow + auth proposes live', () => {
   const repo = makeRepo({
-    '.github/workflows/ci.yml': 'steps:\n  - uses: docker/build-push-action@v6\n',
+    '.github/workflows/ci.yml': 'jobs:\n  deploy:\n    steps:\n      - run: flyctl deploy\n',
     'src/auth/login.ts': 'export {}\n',
   });
   const s = signals(repo, NO_SESSIONS);
@@ -328,27 +328,38 @@ test('signals: deploy workflow + auth proposes live', () => {
   assert.deepEqual(Object.keys(s.files), REQUIRED.live.filter((f) => !UI_ONLY.includes(f)));
 });
 
-test('signals: deploy evidence kinds; deployed alone is not live', () => {
+test('signals: packaging is not deploying, and only a hosted or live link in the README is', () => {
   const repo = makeRepo({
     'compose.yaml': 'services:\n  web:\n    ports:\n      - "80:80"\n',
     'docker-compose.yml': 'services: {}\n',
     'Dockerfile': 'FROM node\n',
-    'README.md': 'See https://github.com/x/y and https://app.example.com\n',
+    'README.md': 'Built with https://mise.jdx.dev and https://github.com/x/y. Data from https://www.opensanctions.org/.\nSee https://example.org/page.\n',
     '.github/workflows/test.yml': 'run: npm test\n',
+    '.github/workflows/image.yml': 'steps:\n  - uses: docker/build-push-action@v6\n    with: { tags: ghcr.io/x/y }\n',
+    'src/auth/login.ts': 'x',
   });
   const s = signals(repo, NO_SESSIONS);
-  assert.deepEqual(s.deployed, ['compose.yaml', 'Dockerfile', 'README.md: https://app.example.com']);
+  assert.deepEqual(s.deployed, []);
+  assert.deepEqual(s.packaged, ['.github/workflows/image.yml', 'compose.yaml', 'Dockerfile']);
+  assert.ok(s.reasons.includes('packaged, not a deploy: Dockerfile'), s.reasons.join('; '));
   assert.equal(s.proposed, 'explore');
-  const users = makeRepo({ 'Dockerfile': 'FROM node\n', 'README.md': 'Built for our users.\n' });
+  const hosted = signals(makeRepo({ 'README.md': 'Try it: https://ett-pilot.vercel.app\n' }), NO_SESSIONS);
+  assert.deepEqual(hosted.deployed, ['README.md: https://ett-pilot.vercel.app']);
+  const said = signals(makeRepo({ 'README.md': 'Docs: https://docs.rs/x\nThe live app is at https://kerdo.acme.net/app\n' }), NO_SESSIONS);
+  assert.deepEqual(said.deployed, ['README.md: https://kerdo.acme.net/app'], 'a line that says live');
+  const users = makeRepo({ 'README.md': 'The live app: https://app.acme.io\nBuilt for our users.\n' });
   const u = signals(users, NO_SESSIONS);
   assert.equal(u.proposed, 'live');
   assert.ok(u.reasons.includes('README names users'), u.reasons.join('; '));
+  const word = signals(makeRepo({ 'README.md': 'Live at https://app.acme.io\nUsers can sign in.\n' }), NO_SESSIONS);
+  assert.notEqual(word.proposed, 'live', 'the word users alone does not name users');
 });
 
 test('signals: auth_code lists the first 5', () => {
-  const files = { 'node_modules/auth/x.js': 'x' };
+  const files = { 'node_modules/auth/x.js': 'x', 'design/state-permission-denied.png': 'x', 'docs/auth.ts': 'x', 'auth-notes.md': 'x' };
   for (const n of ['auth', 'session', 'login', 'tenant', 'rbac', 'permission']) files[`src/${n}.ts`] = 'x';
   const s = signals(makeRepo(files), NO_SESSIONS);
+  assert.deepEqual(signals(makeRepo({ 'shots/login.png': 'x', 'docs/auth.ts': 'x' }), NO_SESSIONS).auth_code, [], 'images and docs are not auth code');
   assert.equal(s.auth_code.length, 5);
   assert.ok(s.auth_code.every((p) => p.startsWith('src/')));
 });

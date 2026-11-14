@@ -69,9 +69,18 @@ const UI_FILE = /\.(tsx|jsx|vue|svelte|html)$/;
 const UI_DIRS = ['web/', 'apps/web/', 'frontend/'];
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?|e2e|fixtures?)\/|\.(test|spec)\.[^/]+$/;
 const AUTH_PATH = /(auth|session|login|tenant|rbac|permission)/i;
-const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/i;
+// Only source files count as auth code: a mockup named state-permission-denied.png is not (seen in a real repo).
+const CODE_FILE = /\.(m?[jt]sx?|cjs|py|rb|go|rs|java|kt|swift|php|cs|ex|exs|sql)$/;
+// A deploy is a job or step that ships somewhere. Building or pushing an image is packaging, not deploying.
+const DEPLOY_WORKFLOW = /deploy/i;
+const PUBLISH_WORKFLOW = /docker\/build-push-action|ghcr\.io/i;
 const COMPOSE_FILE = /^(docker-)?compose\.y[a-z]*ml$/;
-const NAMES_USERS = /\busers?\b/i;
+// A README link is a deploy only on a hosting domain, or on a line that says it is the live app.
+const HOSTING = /(^|\.)(vercel\.app|netlify\.app|pages\.dev|workers\.dev|fly\.dev|onrender\.com|herokuapp\.com|railway\.app|github\.io|web\.app|firebaseapp\.com|azurewebsites\.net|amplifyapp\.com|deno\.dev|surge\.sh)$/;
+const LIVE_LINE = /\b(live|demo|production|staging|deployed|hosted)\b/i;
+const NOT_A_SITE = /(^|\.)(example\.(com|org|net)|localhost)$|^(127\.|0\.0\.0\.0)/;
+// Naming users means people rely on it, not the word "user" in a sentence.
+const NAMES_USERS = /\b(our|real|paying|active|existing) (users|customers|clients)\b|\bused (daily |every day )?by\b|\bcustomers\b/i;
 
 function gitOut(top, args) {
   try {
@@ -186,15 +195,28 @@ function deployEvidence(src) {
   for (const f of files) {
     if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(read(f))) found.push(f);
   }
+  for (const line of read('README.md').split('\n')) {
+    for (const url of line.match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
+      let host = '';
+      try { host = new URL(url).hostname; } catch { continue; }
+      if (NOT_A_SITE.test(host) || host === 'github.com' || host.endsWith('.github.com')) continue;
+      if (HOSTING.test(host) || LIVE_LINE.test(line)) { found.push(`README.md: ${url}`); return found; }
+    }
+  }
+  return found;
+}
+
+// Ready to run somewhere, which is not the same as running for someone: reported, never a reason for live.
+function packagedEvidence(src) {
+  const { files, read } = src;
+  const found = [];
+  for (const f of files) {
+    if (/^\.github\/workflows\/[^/]+$/.test(f) && !DEPLOY_WORKFLOW.test(read(f)) && PUBLISH_WORKFLOW.test(read(f))) found.push(f);
+  }
   for (const f of files) {
     if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(read(f))) found.push(f);
   }
   if (files.includes('Dockerfile')) found.push('Dockerfile');
-  for (const url of read('README.md').match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
-    let host = '';
-    try { host = new URL(url).hostname; } catch { continue; }
-    if (host !== 'github.com' && !host.endsWith('.github.com')) { found.push(`README.md: ${url}`); break; }
-  }
   return found;
 }
 
@@ -222,7 +244,8 @@ export function signals(top, opts = {}) {
   const has_ui = files.some((f) => UI_FILE.test(f) && !TEST_PATH.test(f))
     || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || src.has(d));
   const deployed = deployEvidence(src);
-  const auth_code = files.filter((f) => AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
+  const packaged = packagedEvidence(src);
+  const auth_code = files.filter((f) => CODE_FILE.test(f) && !f.startsWith('docs/') && AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
   const sessions = asOf ? null : matchingSessions(top, sessionsRoot)?.length ?? null;
   const hasProduct = src.has('PRODUCT.md');
   const namesUsers = NAMES_USERS.test(src.read('README.md'));
@@ -236,7 +259,7 @@ export function signals(top, opts = {}) {
   const liveReasons = deployed.length
     ? [...deployed.map((d) => `deployed: ${d}`), ...auth_code.map((a) => `auth code: ${a}`), ...(namesUsers ? ['README names users'] : [])]
     : [];
-  const reasons = [...productReasons, ...liveReasons];
+  const reasons = [...productReasons, ...liveReasons, ...packaged.map((p) => `packaged, not a deploy: ${p}`)];
 
   let proposed = 'explore';
   if (deployed.length && (auth_code.length || namesUsers)) proposed = 'live';
@@ -261,7 +284,7 @@ export function signals(top, opts = {}) {
     ? files.find((f) => /^[^/]+\/DESIGN\.md$/.test(f)) ?? null
     : null;
 
-  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, packaged, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
   if (asOf) out.as_of = asOf.sha;
   return out;
 }

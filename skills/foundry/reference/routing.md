@@ -9,9 +9,9 @@ The router proposes. It never runs a command without the owner's yes.
 Run `node <skill dir>/scripts/foundry.mjs signals --json` from the repo. It prints one JSON object:
 
 - `proposed`: the stage to propose, one of `explore`, `product`, `live`, `scale`.
-- `reasons`: every reason for it, such as `34 commits` or `deployed: Dockerfile`. With none, it says `no signal beyond explore`.
+- `reasons`: every reason for it, such as `34 commits` or `deployed: .github/workflows/deploy.yml`. With none, it says `no signal beyond explore`.
 - `files`: each file the proposed stage requires, `true` when present.
-- `commits`, `age_days`, `sessions`, `has_ui`, `deployed`, `auth_code`: the evidence. `sessions` counts only this machine's Copilot sessions whose folder or origin is this repo; work done from another repo's chat or on a remote workspace is not counted, so read a low number as unknown, not as none.
+- `commits`, `age_days`, `sessions`, `has_ui`, `deployed`, `packaged`, `auth_code`: the evidence. `deployed` is a workflow that deploys, or a README link on a hosting domain or on a line that calls it live, demo, production, staging, deployed or hosted. `packaged` (a Dockerfile, a compose file with ports, a workflow that only publishes an image) is never a reason for live: a repo deployed from somewhere else (an infra repo, a manual step) looks packaged, so ask the owner. `auth_code` counts source files only. `sessions` counts only this machine's Copilot sessions whose folder or origin is this repo; work done from another repo's chat or on a remote workspace is not counted, so read a low number as unknown, not as none.
 - `design_md_found`: a DESIGN.md one folder down that the state does not record yet, else null. Offer `node <skill dir>/scripts/foundry.mjs state --set design_md=<path>`.
 - `code_map_legacy`: `true` when the code map is still at `.agents/code-map.md`, which counts as present until grow moves it to `docs/code-map.md`.
 - `behind`: `{ref, commits}` when the checkout lags its upstream as of the last fetch, else null. At 10 or more, the text output ends with a `warn:` line. Say it first: the files list may be missing docs that exist upstream.
