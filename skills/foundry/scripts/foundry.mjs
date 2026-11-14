@@ -759,11 +759,32 @@ export function nearestTop(cwd = process.cwd()) {
   }
 }
 
+// Claude Code adds a SessionStart hook's plain stdout to the context. Copilot drops any stdout that isn't JSON:
+// it reads {"additionalContext"}, so a plain line never reached a Copilot chat. Claude Code sends hook_event_name
+// on stdin; without stdin, CLAUDE_PLUGIN_ROOT without COPILOT_CLI means Claude Code (the superpowers convention).
+export function hookOutput(line, input = {}, env = {}) {
+  const claude = typeof input.hook_event_name === 'string'
+    || (Object.keys(input).length === 0 && Boolean(env.CLAUDE_PLUGIN_ROOT) && !env.COPILOT_CLI);
+  return claude ? line : JSON.stringify({ additionalContext: line.trimEnd() }) + '\n';
+}
+
+function hookInput() {
+  if (process.stdin.isTTY) return {};
+  try {
+    const v = JSON.parse(readFileSync(0, 'utf8') || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 // SessionStart hook: prints its line or nothing. Always exits 0 and stays silent on any error.
 function hook() {
   try {
-    const line = hookLine(nearestTop());
-    if (line) process.stdout.write(line);
+    const input = hookInput();
+    const cwd = typeof input.cwd === 'string' && existsSync(input.cwd) ? input.cwd : process.cwd();
+    const line = hookLine(nearestTop(cwd));
+    if (line) process.stdout.write(hookOutput(line, input, process.env));
   } catch {
     // A session must start whatever state the repo is in.
   }

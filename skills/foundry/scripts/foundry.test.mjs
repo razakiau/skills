@@ -1391,20 +1391,24 @@ const HOOK_LINE = /^foundry: \d+ missing for product \(.+\), \d+ interview\(s\) 
 const ROOT = join(dirname(FOUNDRY), '..', '..', '..');
 const SKILL = join(dirname(FOUNDRY), '..', 'SKILL.md');
 const PRODUCT_DOCS = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'CONSTRAINTS.md'];
+// Claude Code's env: plain stdout is the context. Copilot sets COPILOT_CLI and reads JSON.
+const CLAUDE_ENV = { CLAUDE_PLUGIN_ROOT: '/plugin', COPILOT_CLI: '' };
+const COPILOT_ENV = { CLAUDE_PLUGIN_ROOT: '/plugin', COPILOT_CLI: '1' };
+const hookRun = (repo) => run(repo, ['hook'], undefined, CLAUDE_ENV);
 const hookRepo = (state, files = []) => makeRepo({
   '.agents/foundry.json': JSON.stringify({ ...STATE, ...state }, null, 2) + '\n',
   ...Object.fromEntries(files.map((f) => [f, 'x\n'])),
 });
 
 test('hook: silent without foundry.json', () => {
-  const r = run(makeRepo(), ['hook']);
+  const r = hookRun(makeRepo());
   assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0]);
 });
 
 test('hook: silent when complete', () => {
-  const r = run(hookRepo({ stage: 'explore', queue: [{ interview: 'design', when: 'later', done: true }] }, ['AGENTS.md']), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'explore', queue: [{ interview: 'design', when: 'later', done: true }] }, ['AGENTS.md']));
   assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0]);
-  const product = run(hookRepo({ stage: 'product' }, PRODUCT_DOCS), ['hook']);
+  const product = hookRun(hookRepo({ stage: 'product' }, PRODUCT_DOCS));
   assert.deepEqual([product.stdout, product.code], ['', 0]);
 });
 
@@ -1414,7 +1418,7 @@ test('hook: one line when product files missing', () => {
     { interview: 'threat', when: 'on entering live', provider: 'shannon', done: false },
     { interview: 'old', when: 'x', done: true },
   ];
-  const r = run(hookRepo({ stage: 'product', queue }, ['AGENTS.md', 'GLOSSARY.md']), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'product', queue }, ['AGENTS.md', 'GLOSSARY.md']));
   assert.match(r.stdout, HOOK_LINE);
   assert.equal(r.stdout, 'foundry: 5 missing for product (PRODUCT.md, docs/decisions/index.md), 2 interview(s) queued; run foundry to see them.\n');
   assert.deepEqual([r.stderr, r.code], ['', 0]);
@@ -1422,34 +1426,34 @@ test('hook: one line when product files missing', () => {
 
 test('hook: one missing names it alone; DESIGN.md counts only when the state has UI', () => {
   const docs = PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md');
-  const one = run(hookRepo({ stage: 'product' }, docs), ['hook']);
+  const one = hookRun(hookRepo({ stage: 'product' }, docs));
   assert.equal(one.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
-  const ui = run(hookRepo({ stage: 'product', has_ui: true }, PRODUCT_DOCS), ['hook']);
+  const ui = hookRun(hookRepo({ stage: 'product', has_ui: true }, PRODUCT_DOCS));
   assert.equal(ui.stdout, 'foundry: 2 missing for product (DESIGN.md, docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
-  const map = run(hookRepo({ stage: 'product', has_ui: true }, [...PRODUCT_DOCS, 'DESIGN.md']), ['hook']);
+  const map = hookRun(hookRepo({ stage: 'product', has_ui: true }, [...PRODUCT_DOCS, 'DESIGN.md']));
   assert.equal(map.stdout, 'foundry: 1 missing for product (docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: nothing missing but an open interview prints (none)', () => {
-  const r = run(hookRepo({ stage: 'product', queue: [{ interview: 'design', when: 'x', done: false }] }, PRODUCT_DOCS), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'product', queue: [{ interview: 'design', when: 'x', done: false }] }, PRODUCT_DOCS));
   assert.match(r.stdout, HOOK_LINE);
   assert.equal(r.stdout, 'foundry: 0 missing for product (none), 1 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: live counts docs/runbooks/ only as a directory', () => {
   const repo = hookRepo({ stage: 'live' }, [...PRODUCT_DOCS, 'docs/threat-model.md', 'docs/runbooks']);
-  assert.equal(run(repo, ['hook']).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
+  assert.equal(hookRun(repo).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: from a subfolder and from a linked worktree it finds the repo top without git', () => {
   const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
   mkdirSync(join(repo, 'src', 'deep'), { recursive: true });
-  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   assert.equal(r.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
   const wt = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-wt-'))) + '/w';
   git(repo, 'worktree', 'add', '-q', wt);
   assert.equal(foundry.nearestTop(join(wt)), wt);
-  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   assert.equal(w.stdout, r.stdout);
 });
 
@@ -1457,14 +1461,36 @@ test('hook: any error exits 0 and prints nothing', () => {
   const corrupt = makeRepo({ '.agents/foundry.json': '{ not json' });
   for (const state of [null, { stage: 'nope' }, { stage: 'product', queue: 'x' }]) {
     const repo = state ? hookRepo(state) : corrupt;
-    const r = run(repo, ['hook']);
+    const r = hookRun(repo);
     assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0], JSON.stringify(state));
   }
   const bare = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-test-')));
   write(bare, '.agents/foundry.json', '[]');
-  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: bare, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: bare, encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   const nogit = { stdout: r.stdout, stderr: r.stderr, code: r.status };
   assert.deepEqual([nogit.stdout, nogit.stderr, nogit.code], ['', '', 0]);
+});
+
+const ONE_MISSING = 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.';
+
+test('hook: Copilot gets JSON additionalContext, and reads the repo from the cwd on stdin', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  const elsewhere = makeRepo();
+  const input = JSON.stringify({ source: 'new', sessionId: 's', timestamp: 1, cwd: repo });
+  const r = run(elsewhere, ['hook'], input, COPILOT_ENV);
+  assert.deepEqual([r.stdout, r.stderr, r.code], [JSON.stringify({ additionalContext: ONE_MISSING }) + '\n', '', 0]);
+  const plain = run(elsewhere, ['hook'], undefined, COPILOT_ENV);
+  assert.deepEqual([plain.stdout, plain.code], ['', 0], 'no stdin: process cwd, which has no state');
+});
+
+test('hook: Claude Code gets the plain line, by stdin or by env; a vanished cwd falls back to the process cwd', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  const claude = run(repo, ['hook'], JSON.stringify({ hook_event_name: 'SessionStart', cwd: repo }), COPILOT_ENV);
+  assert.equal(claude.stdout, ONE_MISSING + '\n');
+  const gone = run(repo, ['hook'], JSON.stringify({ cwd: join(repo, 'nope') }), CLAUDE_ENV);
+  assert.equal(gone.stdout, JSON.stringify({ additionalContext: ONE_MISSING }) + '\n', 'stdin without hook_event_name is Copilot');
+  assert.equal(run(repo, ['hook'], 'not json', CLAUDE_ENV).stdout, ONE_MISSING + '\n');
+  assert.equal(foundry.hookOutput('x\n', {}, {}), '{"additionalContext":"x"}\n', 'unknown host: the SDK standard');
 });
 
 function frontmatter(md) {
