@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -361,6 +361,14 @@ const SETTERS = {
     checkDocPath(key, file, v);
     s[key] = v;
   }])),
+  check_command: (s, v) => {
+    if (!v.trim()) throw new FoundryError('check_command must not be empty', 2);
+    s.check_command = v.trim();
+  },
+  gate: (s, v) => {
+    if (v !== 'on' && v !== 'off') throw new FoundryError('gate must be on or off', 2);
+    s.gate = v;
+  },
   'queue.done': (s, v) => markInterview(s, v, true),
   'queue.open': (s, v) => markInterview(s, v, false),
 };
@@ -545,6 +553,14 @@ function ignoredWarnings(top, paths) {
   return out;
 }
 
+// Whether a GitHub workflow runs the check command, or the script it calls.
+function ciRuns(top, command) {
+  const dir = join(top, '.github', 'workflows');
+  if (!existsSync(dir)) return false;
+  const words = [command, command.replace(/^sh\s+/, '')];
+  return readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).some((f) => words.some((w) => readText(join(dir, f)).includes(w)));
+}
+
 // Writes the stage's missing docs, the state, the doc check and the check task. Returns the report lines.
 export function initFiles(top, { stage, name = basename(top), skip = [], at = {}, dryRun = false } = {}) {
   if (!STAGES.includes(stage)) throw new FoundryError(`--stage must be one of ${STAGES.join(', ')}`, 2);
@@ -609,6 +625,7 @@ export function initFiles(top, { stage, name = basename(top), skip = [], at = {}
   else { writes.push([check.file, check.text]); lines.push(`wired check in ${check.file}`); }
 
   lines.push(`doc-check ${vendorDocCheck(top, { dryRun: true })}`);
+  if (stage !== 'explore' && !ciRuns(top, check.command)) lines.push(`ci: no workflow runs ${check.command}; propose a job that runs it on every PR`);
 
   if (!dryRun) {
     for (const [f, text, mode] of writes) {
@@ -869,7 +886,146 @@ function hook() {
   process.exitCode = 0;
 }
 
-const DISPATCH = { state, signals: signalsCmd, 'init-files': initFilesCmd, 'vendor-check': vendorCheckCmd, digest: digestCmd, 'garden-range': gardenRangeCmd, hook };
+// ---- gate ----
+
+// The tree of the whole working copy as git would commit it after `git add -A` (ignored files left out),
+// built in a throwaway index so the real one is untouched. Starting from a copy of the real index keeps it a
+// stat check for unchanged files.
+export function worktreeTree(top) {
+  const gitDir = gitOut(top, ['rev-parse', '--absolute-git-dir']);
+  if (!gitDir) return null;
+  const tmp = mkdtempSync(join(tmpdir(), 'foundry-gate-'));
+  const index = join(tmp, 'index');
+  try {
+    if (existsSync(join(gitDir, 'index'))) copyFileSync(join(gitDir, 'index'), index);
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    const opts = { cwd: top, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };
+    execFileSync('git', ['add', '-A', '--', '.'], opts);
+    return execFileSync('git', ['write-tree'], opts).trim();
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const stampPath = (top) => {
+  const p = gitOut(top, ['rev-parse', '--git-path', 'foundry-gate']);
+  return p && (p.startsWith('/') ? p : join(top, p));
+};
+
+// The repo's one check command: recorded as check_command, else the one init-files wired.
+export function checkCommand(top, state = readState(top)) {
+  if (typeof state?.check_command === 'string' && state.check_command.trim()) return state.check_command.trim();
+  const plan = planCheck(top);
+  if (plan.text === null) return plan.command;
+  if (plan.script !== undefined && existsSync(join(top, plan.file))) return plan.command;
+  return null;
+}
+
+// Gated: a foundry repo past explore, with a check command, and gate not set to off.
+function gated(top) {
+  const state = readState(top);
+  if (!state || state.stage === 'explore' || state.gate === 'off') return null;
+  const command = checkCommand(top, state);
+  return command ? { state, command } : null;
+}
+
+// `gate`: runs the check command; when it passes, records the tree it passed on.
+function gateCmd(args) {
+  for (const a of args) throw new FoundryError(`unknown argument ${a}`, 2);
+  const top = repoTop();
+  const state = readState(top);
+  if (!state) throw new FoundryError(`no ${STATE_FILE}`, 1);
+  const command = checkCommand(top, state);
+  if (!command) throw new FoundryError('no check command: wire one with init-files, or state --set check_command=<command>', 1);
+  const before = worktreeTree(top);
+  const r = spawnSync('sh', ['-c', command], { cwd: top, stdio: 'inherit' });
+  const code = r.status ?? 1;
+  if (code !== 0) {
+    process.stdout.write(`gate: ${command} failed (exit ${code}); nothing recorded\n`);
+    process.exitCode = code;
+    return;
+  }
+  const after = worktreeTree(top);
+  // A check that rewrites files (a formatter) passed on something else than what is now on disk.
+  if (!before || before !== after) {
+    process.stdout.write(`gate: ${command} passed but changed files; review them and run gate again\n`);
+    process.exitCode = 1;
+    return;
+  }
+  writeFileSync(stampPath(top), `${after}\n`);
+  process.stdout.write(`gate: ${command} passed on ${after.slice(0, 7)}; commits of this state are allowed\n`);
+}
+
+const SHELLS = new Set(['bash', 'Bash', 'run_in_terminal', 'powershell', 'shell']);
+// `git commit` in command position: at the start, or after ; & | ( or a newline. Not commit-tree, not `echo git commit`.
+const GIT_COMMIT = /(^|[;&|(\n])\s*git(\s+-C\s+("[^"]+"|'[^']+'|\S+)|\s+-c\s+\S+|\s+--no-pager)*\s+commit(?![\w-])/;
+
+// The shell commands of a PreToolUse payload: Claude Code's tool_input, Copilot's toolArgs (an object or JSON text).
+export function shellCommands(payload) {
+  const calls = Array.isArray(payload?.toolCalls)
+    ? payload.toolCalls.map((c) => [c?.name, c?.args])
+    : [[payload?.tool_name ?? payload?.toolName, payload?.tool_input ?? payload?.toolInput ?? payload?.toolArgs]];
+  const out = [];
+  for (const [name, raw] of calls) {
+    if (!SHELLS.has(name)) continue;
+    let args = raw;
+    if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = { command: args }; } }
+    if (typeof args?.command === 'string') out.push(args.command);
+  }
+  return out;
+}
+
+// The folder a commit command runs in: its `git -C <dir>`, else a leading `cd <dir>`, else the payload cwd.
+export function commitDir(command, cwd) {
+  const unq = (s) => s.replace(/^["']|["']$/g, '');
+  const c = command.match(/\bgit\s+-C\s+("[^"]+"|'[^']+'|\S+)[^;&|]*\bcommit(?![\w-])/);
+  const d = c ? unq(c[1]) : command.match(/^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/)?.[1];
+  if (!d) return cwd;
+  const dir = unq(d).replace(/^~(?=\/|$)/, homedir());
+  return dir.startsWith('/') ? dir : join(cwd, dir);
+}
+
+// The reason to refuse this commit, or null to let it through.
+export function gateReason(payload, self = fileURLToPath(import.meta.url)) {
+  const cwd = typeof payload?.cwd === 'string' && existsSync(payload.cwd) ? payload.cwd : process.cwd();
+  for (const command of shellCommands(payload)) {
+    if (!GIT_COMMIT.test(command)) continue;
+    const dir = commitDir(command, cwd);
+    if (!existsSync(dir)) continue;
+    const top = repoTop(dir);
+    const g = gated(top);
+    if (!g) continue;
+    const tree = worktreeTree(top);
+    if (!tree) continue;
+    const path = stampPath(top);
+    const stamp = path && existsSync(path) ? readFileSync(path, 'utf8').trim() : '';
+    if (stamp === tree) continue;
+    return `foundry gate: the files in ${top} changed since \`${g.command}\` last passed there${stamp ? '' : ' (no pass recorded)'}. `
+      + `Run \`node "${self}" gate\` from the repo (it runs the check and records the pass), fix what fails, then commit again. `
+      + 'A check that is red for a reason outside this change is the owner\'s call: ask before committing anyway.';
+  }
+  return null;
+}
+
+// PreToolUse hook on shell tools: refuses a git commit whose files never passed the check. Always exits 0.
+function commitHook() {
+  try {
+    const reason = gateReason(hookInput());
+    if (reason) {
+      process.stdout.write(JSON.stringify({
+        permissionDecision: 'deny', permissionDecisionReason: reason,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+      }) + '\n');
+    }
+  } catch {
+    // Never stop work because the gate itself broke.
+  }
+  process.exitCode = 0;
+}
+
+const DISPATCH = { state, signals: signalsCmd, 'init-files': initFilesCmd, 'vendor-check': vendorCheckCmd, digest: digestCmd, 'garden-range': gardenRangeCmd, hook, gate: gateCmd, 'commit-hook': commitHook };
 // The CLI command names; the references may only mention these.
 export const COMMANDS = Object.keys(DISPATCH);
 
@@ -877,7 +1033,7 @@ function main([cmd, ...rest]) {
   try {
     if (Object.hasOwn(DISPATCH, cmd)) DISPATCH[cmd](rest);
     else {
-      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--at <doc>=<path> ...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook\n');
+      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--at <doc>=<path> ...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook | gate | commit-hook\n');
       process.exitCode = 2;
     }
   } catch (err) {

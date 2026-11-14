@@ -115,7 +115,7 @@ test('state: rejects bad values and unknown keys, exit 2', () => {
     ['has_ui=yes', 'foundry: has_ui must be true or false\n'],
     ['readiness_tier=x', 'foundry: readiness_tier must be a whole number\n'],
     ['agents_md.state=old', 'foundry: agents_md.state must be one of migrated, unmigrated\n'],
-    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md, product_md, decisions_index, glossary_md, architecture_md, code_map, screens_md, constraints_md, threat_model, runbooks_dir, queue.done, queue.open\n'],
+    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md, product_md, decisions_index, glossary_md, architecture_md, code_map, screens_md, constraints_md, threat_model, runbooks_dir, check_command, gate, queue.done, queue.open\n'],
     ['stage', 'foundry: --set needs key=value\n'],
   ]) {
     const r = run(repo, ['state', '--set', arg]);
@@ -1234,7 +1234,7 @@ const KNOWLEDGE_REFS = ['providers.md', 'readiness.md', 'stages.md', 'themes.md'
 const COMMAND_REFS = ['routing.md', 'init.md', 'audit.md', 'grow.md', 'providers-cmd.md', 'check.md', 'garden.md', 'tune.md'];
 
 test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.md names a real command', () => {
-  assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook']);
+  assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook', 'gate', 'commit-hook']);
   const named = new Set();
   const files = new Set();
   for (const f of readdirSync(REFS).filter((n) => n.endsWith('.md'))) {
@@ -1245,8 +1245,8 @@ test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.
     }
   }
   for (const f of COMMAND_REFS) assert.ok(files.has(f), `${f} names a foundry command`);
-  // hook runs from the installed git hook, never from a reference step.
-  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook')) assert.ok(named.has(c), `some reference runs ${c}`);
+  // hook and commit-hook run from the plugin's hooks, never from a reference step.
+  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook' && c !== 'commit-hook')) assert.ok(named.has(c), `some reference runs ${c}`);
 });
 
 test('refs: every relative link in reference/*.md resolves', () => {
@@ -1282,7 +1282,7 @@ test('vendor-check prints created/current', () => {
   assert.equal(read(repo, '.agents/doc-check.sh'), readFileSync(DOC_CHECK, 'utf8'));
   const bad = run(repo, ['vendor-check', '--x']);
   assert.deepEqual([bad.stderr, bad.code], ['foundry: unknown argument --x\n', 2]);
-  assert.match(run(repo, []).stderr, /\| vendor-check \| digest \[--limit N\] \[--json\] \| garden-range \[--mark\] \[--json\] \| hook\n$/);
+  assert.match(run(repo, []).stderr, /\| vendor-check \| digest \[--limit N\] \[--json\] \| garden-range \[--mark\] \[--json\] \| hook \| gate \| commit-hook\n$/);
 });
 
 test('refs: the provider steps read the local overlay, and its example exists', () => {
@@ -1633,14 +1633,17 @@ test('skill: SKILL.md under 80 lines, every link resolves', () => {
   prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `SKILL.md:${i + 1}`));
 });
 
-test('hooks.json is valid JSON and keeps the four existing strategic-programming hooks', () => {
+test('hooks.json is valid JSON, keeps the strategic-programming hooks and carries foundry\'s two', () => {
   const { hooks } = JSON.parse(readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8'));
   const sp = (verb) => `node "\${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs" ${verb}`;
-  assert.deepEqual(hooks.UserPromptSubmit, [{ hooks: [{ type: 'command', command: sp('turn'), timeout: 10 }] }]);
-  assert.deepEqual(hooks.PreToolUse, [{ matcher: 'ask_user', hooks: [{ type: 'command', command: sp('ask'), timeout: 30 }] }]);
-  assert.deepEqual(hooks.PostToolUse, [{ matcher: 'ask_user', hooks: [{ type: 'command', command: sp('asked'), timeout: 10 }] }]);
-  assert.deepEqual(hooks.Stop, [{ hooks: [{ type: 'command', command: sp('hook'), timeout: 30 }] }]);
-  assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/skills/foundry/scripts/foundry.mjs" hook', timeout: 10 }] }]);
+  const fd = (verb) => `node "\${CLAUDE_PLUGIN_ROOT}/skills/foundry/scripts/foundry.mjs" ${verb}`;
+  const commands = (event) => (hooks[event] ?? []).flatMap((m) => m.hooks.map((h) => h.command));
+  for (const [event, verb] of [['UserPromptSubmit', 'turn'], ['PreToolUse', 'ask'], ['PostToolUse', 'asked'], ['PostToolUse', 'edited'], ['Stop', 'hook']]) {
+    assert.ok(commands(event).includes(sp(verb)), `${event} ${verb}`);
+  }
+  assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: fd('hook'), timeout: 10 }] }]);
+  const gate = hooks.PreToolUse.find((m) => m.hooks.some((h) => h.command === fd('commit-hook')));
+  assert.deepEqual(gate, { matcher: 'bash|Bash|run_in_terminal|powershell', hooks: [{ type: 'command', command: fd('commit-hook'), timeout: 30 }] });
 });
 
 test('packaging: README and plugin descriptions name all three skills', () => {
@@ -1652,4 +1655,86 @@ test('packaging: README and plugin descriptions name all three skills', () => {
     const desc = f === 'plugin.json' ? json.description : json.plugins[0].description;
     for (const name of ['no-slop', 'strategic-programming', 'foundry']) assert.ok(desc.includes(name), `${f}: ${name}`);
   }
+});
+
+// ---- gate ----
+
+const gateRepo = (state = {}, files = {}) => makeRepo({
+  '.agents/foundry.json': JSON.stringify({ ...STATE, stage: 'product', check_command: 'sh ok.sh', ...state }, null, 2) + '\n',
+  'ok.sh': 'exit 0\n', 'src/a.ts': 'a\n', '.gitignore': 'out/\n', ...files,
+});
+const copilotCommit = (cwd, command = 'git commit -qm x') => ({ sessionId: 's', cwd, toolName: 'bash', toolArgs: JSON.stringify({ command, description: 'commit' }) });
+
+test('gate: a commit is refused until the check passed on exactly these files', () => {
+  const repo = gateRepo();
+  const none = foundry.gateReason(copilotCommit(repo), '/f.mjs');
+  assert.match(none, /^foundry gate: the files in .+ changed since `sh ok\.sh` last passed there \(no pass recorded\)\. Run `node "\/f\.mjs" gate` from the repo/);
+  const g = run(repo, ['gate']);
+  assert.equal(g.code, 0, g.stderr);
+  assert.match(g.stdout, /^gate: sh ok\.sh passed on [0-9a-f]{7}; commits of this state are allowed\n$/);
+  assert.equal(foundry.gateReason(copilotCommit(repo)), null);
+  write(repo, 'out/build.js', 'x');
+  assert.equal(foundry.gateReason(copilotCommit(repo)), null, 'ignored files do not count');
+  write(repo, 'src/new.ts', 'x');
+  assert.match(foundry.gateReason(copilotCommit(repo)), /changed since `sh ok\.sh` last passed there\. Run/, 'an untracked file counts');
+  run(repo, ['gate']);
+  write(repo, 'src/a.ts', 'edited\n');
+  assert.ok(foundry.gateReason(copilotCommit(repo)), 'an edit after the pass');
+  assert.equal(git(repo, 'status', '--porcelain').includes('src/a.ts'), true, 'the real index is untouched');
+  assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
+});
+
+test('gate: a failing or file-changing check records nothing', () => {
+  const red = gateRepo({}, { 'ok.sh': 'echo boom; exit 3\n' });
+  const r = run(red, ['gate']);
+  assert.deepEqual([r.code, r.stdout], [3, 'boom\ngate: sh ok.sh failed (exit 3); nothing recorded\n']);
+  assert.ok(foundry.gateReason(copilotCommit(red)));
+  const fmt = gateRepo({}, { 'ok.sh': 'echo formatted > src/a.ts\n' });
+  const f = run(fmt, ['gate']);
+  assert.deepEqual([f.code, f.stdout], [1, 'gate: sh ok.sh passed but changed files; review them and run gate again\n']);
+  assert.ok(foundry.gateReason(copilotCommit(fmt)));
+  assert.equal(run(makeRepo(), ['gate']).code, 1, 'no state');
+});
+
+test('gate: which commands and repos it applies to', () => {
+  const repo = gateRepo();
+  const elsewhere = makeRepo();
+  for (const cmd of [`cd ${repo} && git commit -m x`, `git -C ${repo} commit --amend --no-edit`, `cd "${repo}"; git add -A; git -c core.x=y commit -qm "y"`]) {
+    assert.ok(foundry.gateReason(copilotCommit(elsewhere, cmd)), cmd);
+  }
+  for (const cmd of ['git log --oneline', 'git commit-tree HEAD^{tree}', 'echo git commit', `git -C ${repo} status`]) {
+    assert.equal(foundry.gateReason(copilotCommit(repo, cmd)), null, cmd);
+  }
+  assert.ok(foundry.gateReason({ tool_name: 'Bash', tool_input: { command: 'git commit -m x' }, cwd: repo }), 'Claude Code payload');
+  assert.ok(foundry.gateReason({ cwd: repo, toolCalls: [{ name: 'view', args: {} }, { name: 'bash', args: { command: 'git commit -m x' } }] }), 'batched calls');
+  assert.equal(foundry.gateReason({ toolName: 'edit', toolArgs: { command: 'git commit' }, cwd: repo }), null, 'not a shell');
+  assert.equal(foundry.gateReason(copilotCommit(gateRepo({ stage: 'explore' }))), null, 'explore is not gated');
+  assert.equal(foundry.gateReason(copilotCommit(gateRepo({ gate: 'off' }))), null, 'gate off');
+  assert.equal(foundry.gateReason(copilotCommit(elsewhere)), null, 'no foundry state');
+  const unwired = gateRepo({ check_command: undefined });
+  assert.equal(foundry.gateReason(copilotCommit(unwired)), null, 'no check command, nothing to gate on');
+  const npm = gateRepo({ check_command: undefined }, { 'package.json': '{"scripts":{"check":"true"}}\n' });
+  assert.equal(foundry.checkCommand(npm), 'npm run check', 'the wired check');
+});
+
+test('commit-hook: denies with JSON for Copilot and Claude Code, silent otherwise, always exit 0', () => {
+  const repo = gateRepo();
+  const r = run(repo, ['commit-hook'], JSON.stringify(copilotCommit(repo)));
+  assert.equal(r.code, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse');
+  assert.match(out.permissionDecisionReason, /^foundry gate: /);
+  run(repo, ['gate']);
+  assert.deepEqual(run(repo, ['commit-hook'], JSON.stringify(copilotCommit(repo))).stdout, '');
+  assert.deepEqual([run(repo, ['commit-hook'], 'not json').stdout, run(repo, ['commit-hook'], 'not json').code], ['', 0]);
+});
+
+test('init-files: from product on, says when no workflow runs the check', () => {
+  const bare = makeRepo({ 'Makefile': 'test:\n\ttrue\n' });
+  assert.ok(init(bare, '--stage', 'product').stdout.split('\n').includes('ci: no workflow runs make check; propose a job that runs it on every PR'));
+  const wired = makeRepo({ 'Makefile': 'test:\n\ttrue\n', '.github/workflows/ci.yml': 'jobs:\n  c:\n    steps:\n      - run: make check\n' });
+  assert.ok(!init(wired, '--stage', 'product').stdout.includes('ci:'));
+  assert.ok(!init(makeRepo({ 'Makefile': 'test:\n\ttrue\n' }), '--stage', 'explore').stdout.includes('ci:'), 'not at explore');
 });

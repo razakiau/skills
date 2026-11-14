@@ -4,7 +4,7 @@ When this file and the code disagree, the code wins: say so, and propose the fix
 
 ## Check
 
-Run this before you call a change done. It must pass.
+Run this before you call a change done, and before each commit. It must pass.
 
 ```sh
 {{check}}
