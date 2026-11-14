@@ -733,6 +733,50 @@ test('stale: multi-file entry', () => {
   assert.ok(r.stdout.endsWith('stale: 0, gone: 1, unmapped: 0\n'));
 });
 
+const SHELL_MAP = [MARKER, '', '## Shell', 'route: /', 'file: ui/src/shell/', ''].join('\n');
+
+test('a folder in file: counts every file under it, for record, stale and touched', () => {
+  const repo = makeRepo({
+    'docs/ui/screens.md': SHELL_MAP,
+    '.gitignore': '*.log\n',
+    'ui/src/shell/frame.tsx': 'A',
+    'ui/src/shell/parts/bar.css': 'B',
+  });
+  // A new file counts before it is committed; an ignored one never does.
+  write(repo, 'ui/src/shell/menu.tsx', 'C');
+  write(repo, 'ui/src/shell/debug.log', 'ignored');
+  const hash = 'sha256:' + createHash('sha256').update('A\0C\0B').digest('hex').slice(0, 12);
+  assert.equal(fileHash(repo, 'ui/src/shell/'), hash);
+  write(repo, '.check-screens/captures/shell-360-light.png', 'png');
+  const rec = run(repo, ['record', 'Shell']);
+  assert.equal(rec.code, 0, rec.stderr);
+  assert.match(readFileSync(join(repo, 'docs/ui/screens.md'), 'utf8'), new RegExp(`^last-capture: ${today()} ${hash} 360-light$`, 'm'));
+  let r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.endsWith('stale: 0, gone: 0, unmapped: 0\n'), r.stdout);
+  write(repo, 'ui/src/shell/parts/bar.css', 'B2');
+  r = run(repo, ['stale']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`^stale Shell \\(ui/src/shell/ changed since ${today()}\\)$`, 'm'));
+  r = run(repo, ['touched']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, 'screen Shell (ui/src/shell/menu.tsx, ui/src/shell/parts/bar.css)\n');
+  rmSync(join(repo, 'ui/src/shell'), { recursive: true });
+  mkdirSync(join(repo, 'ui/src/shell'));
+  assert.match(run(repo, ['stale']).stdout, /^gone Shell \(ui\/src\/shell\/\)$/m);
+});
+
+test('a folder in file: outside git, every file under it', () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'check-screens-nogit-')));
+  write(dir, 'ui/src/shell/frame.tsx', 'A');
+  write(dir, 'ui/src/shell/parts/bar.css', 'B');
+  const r = spawnSync('node', ['--input-type=module', '-e',
+    `import { fileHash } from ${JSON.stringify(pathToFileURL(CHECK_SCREENS).href)}; process.stdout.write(String(fileHash(process.cwd(), 'ui/src/shell')));`],
+  { cwd: dir, encoding: 'utf8', env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(dir) } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'sha256:' + createHash('sha256').update('A\0B').digest('hex').slice(0, 12));
+});
+
 test('stale: routes from stdin', () => {
   const repo = recorded({ 'src/home.tsx': 'x', 'src/a.tsx': 'A', 'src/b.tsx': 'B' });
   const r = run(repo, ['stale', '--routes', '-'], JSON.stringify(['/', { path: '/settings' }, '/settings/billing']));
@@ -819,7 +863,7 @@ test('skill: description ≤ 300 chars, names screen and mockup, says what skips
   const fm = frontmatter(text);
   assert.equal(fm.name, 'check-screens');
   assert.equal(fm.license, 'MIT');
-  assert.match(text, /^metadata:\n  version: "1\.1\.0"$/m);
+  assert.match(text, /^metadata:\n  version: "1\.1\.1"$/m);
   const d = fm.description;
   assert.ok(d && d.length <= 300, `description is ${d?.length} chars`);
   assert.match(d, /screen/i);

@@ -3,7 +3,7 @@ name: check-screens
 description: Load for any task that adds, changes or fixes a screen, page, layout or UI component (features, mobile layout bugs, restyles) or a mockup (record, compare, "does it match"), alongside other skills. It checks the running app before you say done. Skip for backend-only work.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # check-screens

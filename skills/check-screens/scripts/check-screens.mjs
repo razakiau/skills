@@ -342,14 +342,48 @@ function insideTop(top, f) {
   return Boolean(rel) && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
 }
 
-// A `file:` path that is missing or resolves outside the repo top: the map cannot vouch for it.
-const goneFile = (top, f) => !insideTop(top, f) || !existsSync(join(top, f));
+const isDir = (top, f) => {
+  try { return statSync(join(top, f)).isDirectory(); } catch { return false; }
+};
+
+// The files under folder `f`, as paths relative to the repo top, sorted: the files git tracks
+// there plus new files it does not ignore, or every file under it (no .git, no node_modules) outside git.
+function folderFiles(top, f) {
+  const rel = relative(top, resolve(top, f)).split('\\').join('/');
+  let found;
+  try {
+    found = execFileSync('git', ['-c', 'core.quotepath=off', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', rel],
+      { cwd: top, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\0').filter(Boolean);
+  } catch {
+    found = [];
+    const walk = (dir) => {
+      for (const d of readdirSync(join(top, dir), { withFileTypes: true })) {
+        const p = `${dir}/${d.name}`;
+        if (d.isDirectory()) { if (d.name !== '.git' && d.name !== 'node_modules') walk(p); } else found.push(p);
+      }
+    };
+    walk(rel);
+  }
+  // git lists a tracked file deleted from the working copy; only files that are there count.
+  return [...new Set(found)].filter((p) => !isDir(top, p) && existsSync(join(top, p))).sort();
+}
+
+// The files a `file:` field names: a file as written, a folder as every file under it.
+export function expandFiles(top, fileField) {
+  return [...new Set(list(fileField).flatMap((f) => (insideTop(top, f) && isDir(top, f) ? folderFiles(top, f) : [f])))].sort();
+}
+
+// A `file:` path that is missing, resolves outside the repo top, or is a folder with no file in it:
+// the map cannot vouch for it.
+const goneFile = (top, f) => !insideTop(top, f) || !existsSync(join(top, f)) || (isDir(top, f) && !folderFiles(top, f).length);
 
 // `sha256:` plus 12 hex over the bytes of the entry's files, sorted by path and joined with a NUL byte.
-// null when the field lists no file or any listed file is gone (missing or outside the repo top).
+// A folder counts as every file under it. null when the field lists no file or any listed path is gone
+// (missing, outside the repo top, or an empty folder).
 export function fileHash(top, fileField) {
-  const files = list(fileField).sort();
-  if (!files.length || files.some((f) => goneFile(top, f))) return null;
+  const named = list(fileField);
+  if (!named.length || named.some((f) => goneFile(top, f))) return null;
+  const files = expandFiles(top, fileField);
   const parts = files.flatMap((f, i) => (i ? [Buffer.from([0]), readFileSync(join(top, f))] : [readFileSync(join(top, f))]));
   return 'sha256:' + createHash('sha256').update(Buffer.concat(parts)).digest('hex').slice(0, 12);
 }
@@ -414,9 +448,13 @@ function touchedCmd(args) {
   const out = [];
   const owned = new Set();
   for (const s of screens) {
-    const files = list(s.fields.file);
-    files.forEach((f) => owned.add(f));
-    const hit = files.filter((f) => changed.includes(f));
+    // A file in field order; a folder as the changed files under it, a deleted one included.
+    const hit = [...new Set(list(s.fields.file).flatMap((f) => {
+      if (!(insideTop(top, f) && isDir(top, f))) return changed.includes(f) ? [f] : [];
+      const under = `${relative(top, resolve(top, f)).split('\\').join('/')}/`;
+      return changed.filter((c) => c.startsWith(under));
+    }))];
+    [...expandFiles(top, s.fields.file), ...hit].forEach((f) => owned.add(f));
     if (hit.length) out.push(`screen ${s.name} (${hit.join(', ')})`);
   }
   const textOf = (f) => (existsSync(join(top, f)) ? readFileSync(join(top, f), 'utf8') : '');
@@ -424,7 +462,7 @@ function touchedCmd(args) {
     out.push(`shared ${f}`);
     const name = f.split('/').pop().replace(/\.[^.]+$/, '');
     for (const s of screens) {
-      if (list(s.fields.file).some((own) => importsBasename(textOf(own), name))) out.push(`  used by ${s.name}`);
+      if (expandFiles(top, s.fields.file).some((own) => importsBasename(textOf(own), name))) out.push(`  used by ${s.name}`);
     }
   }
   process.stdout.write(out.map((l) => `${l}\n`).join(''));
@@ -473,7 +511,7 @@ function recordCmd(args) {
   if (outside.length) throw new CheckScreensError(`a file of ${entry.name} is outside the repo: ${outside.join(', ')}`, 1);
   const hash = fileHash(top, entry.fields.file);
   if (!hash) throw new CheckScreensError(`a file of ${entry.name} is missing: ${entry.fields.file}`, 1);
-  const newest = Math.max(...list(entry.fields.file).map((f) => statSync(join(top, f)).mtimeMs));
+  const newest = Math.max(...expandFiles(top, entry.fields.file).map((f) => statSync(join(top, f)).mtimeMs));
   const old = files.filter((f) => statSync(join(dir, f)).mtimeMs < newest);
   if (old.length) throw new CheckScreensError(`captures of ${entry.name} are older than its files (they changed after the capture): ${old.join(', ')}; capture again`, 1);
   const variants = files.map((f) => f.slice(entry.slug.length + 1, -4)).sort();

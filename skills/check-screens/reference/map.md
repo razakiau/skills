@@ -51,7 +51,7 @@ Other lines are allowed: prose, blank lines, unknown keys, CRLF endings. `record
 | Field | Holds | Written by |
 | --- | --- | --- |
 | `route` | The URL path, or the native screen name | The loop |
-| `file` | The files that render the screen, comma-separated, relative to the repo top | The loop |
+| `file` | The files that render the screen, comma-separated, relative to the repo top. A folder (`ui/src/shell/`) stands for every file under it ([Folders](#folders)) | The loop |
 | `purpose` | What the screen is for, in one line | The loop |
 | `family` | The layout family, such as `tab-root` or `detail`; comma-separated when there are several | The loop |
 | `states` | The states worth capturing: `empty`, `loaded`, `error`, `long content` | The loop |
@@ -106,7 +106,7 @@ node <skill dir>/scripts/check-screens.mjs stale --routes routes.json
 `stale` reads the map and edits nothing. It prints:
 
 - `stale <name> (<file field> changed since <date>)`: the hash of the entry's files no longer matches its `last-capture:`. The parentheses hold the whole `file:` field, not only the file that changed.
-- `gone <name> (<files>)`: a listed file is missing, or its path resolves outside the repo top.
+- `gone <name> (<files>)`: a listed file is missing, its path resolves outside the repo top, or a listed folder holds no file.
 - `unmapped <route>`: a route in the routes file that no entry's `route:` matches exactly.
 - `routes: not checked (pass --routes)`, when you gave no routes file.
 - A last line: `stale: <n>, gone: <n>, unmapped: <n>`.
@@ -116,6 +116,16 @@ It exits 0 whatever it finds. A routes file that is missing, or JSON that is not
 An entry with no `file:` line is skipped. An entry with no `last-capture:` cannot be stale; only `gone` applies to it. To clear a `stale` line, run the loop on the screen and `record` it.
 
 The hash is `sha256:` and the first 12 hex digits of SHA-256 over the entry's files, sorted by path and joined with a NUL byte. It covers content, not commits, because captures happen before the commit.
+
+### Folders
+
+A `file:` entry may name a folder, such as `ui/src/shell/` (the trailing slash is optional). It stands for every file under it, at any depth: in git, the files git tracks there plus new files it does not ignore; outside git, every file under it except `.git` and `node_modules`. Each command treats those files as if the entry listed them one by one:
+
+- `stale` and `record` hash them with the entry's other files, all sorted by path. Adding, editing or deleting a file under it makes the entry stale. A folder with no file in it is `gone`.
+- `record` compares the captures with the newest of them.
+- `touched` names the changed files under the folder, a deleted one included, and reads them when it looks for the users of a shared file.
+
+The parentheses of a `stale` line still hold the `file:` field as written, so they show the folder, not the file that changed.
 
 ## Route tables
 
