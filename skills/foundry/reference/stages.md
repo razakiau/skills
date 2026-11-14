@@ -36,7 +36,7 @@ It adds:
 - PRODUCT.md: intent, users, non-goals, and the rules that hold everywhere.
 - A decisions folder with an index, and a glossary.
 - ARCHITECTURE.md plus the code map.
-- DESIGN.md before the first screen is built. It may live below the top, such as `web/DESIGN.md`: record the path with `state --set design_md=<path>`, and every check reads it there.
+- DESIGN.md before the first screen is built. It may live below the top, such as `web/DESIGN.md`: record the path with `state --set design_md=<path>`, and every check reads it there. Any required doc can live elsewhere the same way (`product_md`, `decisions_index`, `glossary_md`, `architecture_md`, `code_map`, `screens_md`, `constraints_md`, `threat_model`, `runbooks_dir`).
 - With UI, a screen map in `docs/ui/screens.md`: each screen, its approved mockup and when it was last checked. check-screens keeps it true; AGENTS.md gets the line "After any UI change, run check-screens before reporting done."
 - CONSTRAINTS.md, the quality bar.
 - One `check` command that runs the build, lint, tests and the doc check.

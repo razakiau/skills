@@ -22,7 +22,8 @@ List the files whose provider is installed and will write them, such as `GLOSSAR
 
 `node <skill dir>/scripts/foundry.mjs init-files --stage <stage> --skip <file>,<file>`
 
-Leave out `--skip` when the list is empty. Add `--dry-run` first if the owner wants to see the plan. Each line is `created <path>`, `kept <path> (exists)`, `wired check in <file>` or `doc-check <created|updated|current>`.
+A doc the repo already keeps elsewhere (`docs/product/PRODUCT.md`, a decisions folder with its own index) is recorded, not duplicated: add `--at PRODUCT.md=docs/product/PRODUCT.md` (one per doc; `docs/decisions/index.md=<its index>` for decisions). The state keeps the path, every check reads the doc there, and nothing is written at the default place.
+Leave out `--skip` when the list is empty. Add `--dry-run` first if the owner wants to see the plan. Each line is `created <path>`, `kept <path> (exists)`, `kept <path> (recorded for <doc>)`, `wired check in <file>` or `doc-check <created|updated|current>`.
 A line `warn <path> is gitignored (<source>:<line>): add it with git add -f` means the file will not reach other clones. Show each one to the owner and offer `git add -f <path>`. Never force-add without a yes.
 Done: the output is shown, and each `warn` line has the owner's answer.
 

@@ -44,9 +44,27 @@ export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: 
 export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
 export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi || !UI_ONLY.includes(f));
 
-// A repo may keep DESIGN.md below the top (web/DESIGN.md); the state records where as design_md.
-const designPath = (state) => (typeof state?.design_md === 'string' && state.design_md ? state.design_md : 'DESIGN.md');
-const asRecorded = (state) => (f) => (f === 'DESIGN.md' ? designPath(state) : f);
+// A repo may keep a required doc somewhere else (web/DESIGN.md, docs/product/PRODUCT.md); the state records
+// where under one flat key per doc, so the vendored doc-check can read it with sed.
+export const PATH_KEYS = {
+  'PRODUCT.md': 'product_md', 'docs/decisions/index.md': 'decisions_index', 'GLOSSARY.md': 'glossary_md',
+  'ARCHITECTURE.md': 'architecture_md', 'docs/code-map.md': 'code_map', 'DESIGN.md': 'design_md',
+  'docs/ui/screens.md': 'screens_md', 'CONSTRAINTS.md': 'constraints_md', 'docs/threat-model.md': 'threat_model',
+  'docs/runbooks/': 'runbooks_dir',
+};
+const asRecorded = (state) => (f) => {
+  const v = Object.hasOwn(PATH_KEYS, f) ? state?.[PATH_KEYS[f]] : undefined;
+  return typeof v === 'string' && v ? v : f;
+};
+
+// A recorded path is inside the repo, without . or .. parts; a folder ends in /, a file in .md.
+function checkDocPath(key, file, v) {
+  const parts = v.replace(/\/$/, '').split('/');
+  const shape = file.endsWith('/') ? /^[^\s"]+\/$/ : /^[^\s"]+\.md$/;
+  if (v.startsWith('/') || !shape.test(v) || parts.some((p) => p === '' || p === '.' || p === '..') || v.includes(',')) {
+    throw new FoundryError(`${key} must be a repo path ${file.endsWith('/') ? 'ending in /' : 'ending in .md'}`, 2);
+  }
+}
 
 // The code map moved out of the hidden folder, where ripgrep does not look. The old place still counts
 // until grow moves it.
@@ -339,7 +357,25 @@ const SETTERS = {
     if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').some((p) => p === '.' || p === '..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
     s.design_md = v;
   },
+  ...Object.fromEntries(Object.entries(PATH_KEYS).filter(([, k]) => k !== 'design_md').map(([file, key]) => [key, (s, v) => {
+    checkDocPath(key, file, v);
+    s[key] = v;
+  }])),
+  'queue.done': (s, v) => markInterview(s, v, true),
+  'queue.open': (s, v) => markInterview(s, v, false),
 };
+
+// Marks one queued interview by its name, compared without case or surrounding spaces.
+function markInterview(s, name, done) {
+  const queue = Array.isArray(s.queue) ? s.queue : [];
+  const key = name.trim().toLowerCase();
+  const hit = queue.filter((q) => q && typeof q.interview === 'string' && q.interview.trim().toLowerCase() === key);
+  if (hit.length !== 1) {
+    const names = queue.map((q) => q?.interview).filter(Boolean).join('; ');
+    throw new FoundryError(`no single queued interview named "${name}"; the queue holds: ${names || 'nothing'}`, 2);
+  }
+  hit[0].done = done;
+}
 
 function parseSets(args) {
   const sets = [];
@@ -373,6 +409,8 @@ function state(args) {
 
 // ---- init-files ----
 
+const DECISIONS_INDEX = 'docs/decisions/index.md';
+const DECISION_TEMPLATE = 'docs/decisions/0000-template.md';
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 const DOC_CHECK = '.agents/doc-check.sh';
 const CHECK_SH = '.agents/check.sh';
@@ -508,27 +546,38 @@ function ignoredWarnings(top, paths) {
 }
 
 // Writes the stage's missing docs, the state, the doc check and the check task. Returns the report lines.
-export function initFiles(top, { stage, name = basename(top), skip = [], dryRun = false } = {}) {
+export function initFiles(top, { stage, name = basename(top), skip = [], at = {}, dryRun = false } = {}) {
   if (!STAGES.includes(stage)) throw new FoundryError(`--stage must be one of ${STAGES.join(', ')}`, 2);
   const lines = [];
   const writes = [];
   const reported = [];
-  const exists = (f) => existsSync(join(top, f));
-  const current = readState(top);
-  const hasUi = current ? current.has_ui === true : signals(top).has_ui;
+  const recordedPaths = {};
+  for (const [file, path] of Object.entries(at)) {
+    if (!Object.hasOwn(PATH_KEYS, file)) throw new FoundryError(`--at accepts ${Object.keys(PATH_KEYS).join(', ')}`, 2);
+    SETTERS[PATH_KEYS[file]](recordedPaths, path);
+  }
+  const stateOnDisk = readState(top);
+  const current = stateOnDisk && { ...stateOnDisk, ...recordedPaths };
+  const recorded = asRecorded(current ?? recordedPaths);
+  // The decision template goes next to a recorded decisions index.
+  const where = (f) => (f === DECISION_TEMPLATE && recorded(DECISIONS_INDEX) !== DECISIONS_INDEX
+    ? join(dirname(recorded(DECISIONS_INDEX)), basename(f)) : recorded(f));
+  // A doc recorded elsewhere is looked for there, and never written at its default place.
+  const exists = (f) => existsSync(join(top, where(f)));
+  const hasUi = stateOnDisk ? stateOnDisk.has_ui === true : signals(top).has_ui;
   const uiDocs = hasUi && stage !== 'explore' ? UI_TEMPLATES : [];
-  const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f));
+  const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f) && !skip.includes(where(f)));
   const written = new Set(docs.filter(([f]) => !exists(f)).map(([f]) => f));
   const willExist = (f) => !skip.includes(f) && (written.has(f) || exists(f));
   const legacyMap = legacyCodeMap(exists);
   // AGENTS.md links the code map where it is today; grow moves it and the link together.
-  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : asRecorded(current)(f));
+  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : where(f));
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
   if (legacyMap) lines.push(`warn ${MOVE_CODE_MAP}`);
   if (current && current.stage !== stage) lines.push(`warn --stage ${stage} differs from the recorded stage ${current.stage}; the state keeps ${current.stage}, so set it with state --set stage=${stage} first`);
-  reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
+  reported.push('AGENTS.md', ...docs.map(([f]) => where(f)), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
     lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, rename));
@@ -538,8 +587,8 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
-    if (written.has(f)) { writes.push([f, template(t)]); lines.push(`created ${f}`); }
-    else lines.push(`kept ${f} (exists)`);
+    if (written.has(f)) { writes.push([where(f), template(t)]); lines.push(`created ${where(f)}`); }
+    else lines.push(where(f) === f ? `kept ${f} (exists)` : `kept ${where(f)} (recorded for ${f})`);
   }
 
   const docCheckVersion = versionOf(template('doc-check.sh'));
@@ -549,6 +598,7 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
       version: 1, stage, stage_set: today(), stage_reason: 'init', has_ui: hasUi,
       agents_md: { budget_lines: 100, state: agentsExisted ? 'unmigrated' : 'migrated' },
       readiness_tier: 0, providers: {}, queue: [], garden_last: null, doc_check_version: docCheckVersion,
+      ...recordedPaths,
     };
   lines.push(current ? `kept ${STATE_FILE} (exists)` : `created ${STATE_FILE}`);
 
@@ -585,7 +635,12 @@ function initFilesCmd(args) {
     if (a === '--stage') opts.stage = value();
     else if (a === '--name') opts.name = value();
     else if (a === '--skip') opts.skip.push(...value().split(',').map((s) => s.trim().replace(/^\.\//, '')).filter(Boolean));
-    else if (a === '--dry-run') opts.dryRun = true;
+    else if (a === '--at') {
+      const pair = value();
+      const eq = pair.indexOf('=');
+      if (eq < 1) throw new FoundryError('--at needs <doc>=<path>', 2);
+      opts.at = { ...opts.at, [pair.slice(0, eq).replace(/^\.\//, '')]: pair.slice(eq + 1) };
+    } else if (a === '--dry-run') opts.dryRun = true;
     else throw new FoundryError(`unknown argument ${a}`, 2);
   }
   if (!opts.stage) throw new FoundryError('init-files needs --stage', 2);
@@ -716,7 +771,7 @@ function digestCmd(args) {
 const GARDEN_DEFAULT = 50;
 const EMPTY_TREE = (top) => gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
 
-// The commits since the last garden pass, or the last 50 (from the root when there are fewer), as git's from..to.
+// The commits since the last garden pass, or since HEAD~50 on the first-parent line (from the root when there are fewer), as git's from..to.
 export function gardenRange(top) {
   const to = gitOut(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
   if (!to) throw new FoundryError('no commits yet', 1);
@@ -822,7 +877,7 @@ function main([cmd, ...rest]) {
   try {
     if (Object.hasOwn(DISPATCH, cmd)) DISPATCH[cmd](rest);
     else {
-      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook\n');
+      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--at <doc>=<path> ...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook\n');
       process.exitCode = 2;
     }
   } catch (err) {

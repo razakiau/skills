@@ -115,7 +115,7 @@ test('state: rejects bad values and unknown keys, exit 2', () => {
     ['has_ui=yes', 'foundry: has_ui must be true or false\n'],
     ['readiness_tier=x', 'foundry: readiness_tier must be a whole number\n'],
     ['agents_md.state=old', 'foundry: agents_md.state must be one of migrated, unmigrated\n'],
-    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md\n'],
+    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md, product_md, decisions_index, glossary_md, architecture_md, code_map, screens_md, constraints_md, threat_model, runbooks_dir, queue.done, queue.open\n'],
     ['stage', 'foundry: --set needs key=value\n'],
   ]) {
     const r = run(repo, ['state', '--set', arg]);
@@ -830,6 +830,48 @@ test('init-files: a recorded design_md is linked, and DESIGN.md is not asked for
   assert.equal(bad.code, 2);
   assert.equal(run(repo, ['state', '--set', 'design_md=web/notes.md']).code, 2);
   for (const v of ['web/OLDDESIGN.md', 'xDESIGN.md', '/abs/DESIGN.md', './DESIGN.md', 'web/./DESIGN.md']) assert.equal(run(repo, ['state', '--set', `design_md=${v}`]).code, 2, v);
+});
+
+test('init-files --at: docs kept elsewhere are recorded, never written at the top, and doc-check reads them there', () => {
+  const repo = makeRepo({
+    'docs/product/PRODUCT.md': '# P\n\nSee [decisions](decisions/README.md).\n',
+    'docs/product/decisions/README.md': '# D\n\n- [one](0001-one.md)\n',
+    'docs/product/decisions/0001-one.md': '# 0001\n',
+  });
+  const r = init(repo, '--stage', 'product', '--at', 'PRODUCT.md=docs/product/PRODUCT.md', '--at', 'docs/decisions/index.md=docs/product/decisions/README.md');
+  assert.equal(r.code, 0, r.stderr);
+  const out = r.stdout.split('\n');
+  assert.ok(out.includes('kept docs/product/PRODUCT.md (recorded for PRODUCT.md)'), r.stdout);
+  assert.ok(out.includes('created docs/product/decisions/0000-template.md'), r.stdout);
+  for (const f of ['PRODUCT.md', 'docs/decisions']) assert.ok(!exists(repo, f), `${f} not written at its default place`);
+  const s = readState(repo);
+  assert.deepEqual([s.product_md, s.decisions_index], ['docs/product/PRODUCT.md', 'docs/product/decisions/README.md']);
+  assert.ok(read(repo, 'AGENTS.md').includes('docs/product/PRODUCT.md'), 'AGENTS.md links the recorded place');
+  const check = repoCheck(repo);
+  assert.deepEqual(check.lines.filter((l) => /PRODUCT|decisions|link/.test(l)), [], check.stdout);
+  assert.ok(check.lines.includes('doc-check: FAIL required: docs/code-map.md'), 'the code map comes from its interview, as before');
+  write(repo, 'docs/product/decisions/0002-two.md', '# 0002\n');
+  assert.ok(repoCheck(repo).lines.includes('doc-check: FAIL decisions: docs/product/decisions/0002-two.md not linked from docs/product/decisions/README.md'));
+  write(repo, 'docs/product/PRODUCT.md', '# P\n\nSee [gone](nope.md).\n');
+  assert.ok(repoCheck(repo).lines.includes('doc-check: FAIL link: docs/product/PRODUCT.md -> nope.md'), 'links are checked at the recorded place');
+  assert.equal(foundry.hookLine(repo), 'foundry: 1 missing for product (docs/code-map.md), 0 interview(s) queued; run foundry to see them.\n', 'the hook looks at the recorded place');
+  assert.equal(init(makeRepo(), '--stage', 'product', '--at', 'AGENTS.md=x/AGENTS.md').code, 2, 'AGENTS.md stays at the top');
+  assert.equal(init(makeRepo(), '--stage', 'product', '--at', 'PRODUCT.md=../P.md').code, 2);
+});
+
+test('state --set: doc paths are checked, and a queued interview is marked by name', () => {
+  const repo = withState({ ...STATE, queue: [{ interview: 'code map', when: 'x', done: false }, { interview: 'Glossary', when: 'y', done: false }] });
+  for (const v of ['/abs.md', 'a/../b.md', 'notes.txt', 'a b.md', 'x,y.md']) assert.equal(run(repo, ['state', '--set', `product_md=${v}`]).code, 2, v);
+  assert.equal(run(repo, ['state', '--set', 'runbooks_dir=ops/runbooks']).code, 2, 'a folder ends in /');
+  assert.equal(run(repo, ['state', '--set', 'runbooks_dir=ops/runbooks/']).code, 0);
+  const r = run(repo, ['state', '--set', 'queue.done= glossary ']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [false, true]);
+  run(repo, ['state', '--set', 'queue.open=Glossary', '--set', 'queue.done=code map']);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [true, false]);
+  const bad = run(repo, ['state', '--set', 'queue.done=design']);
+  assert.deepEqual([bad.code, bad.stderr], [2, 'foundry: no single queued interview named "design"; the queue holds: code map; Glossary\n']);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [true, false], 'nothing written on error');
 });
 
 test('init-files: rust repo without runner gets .agents/check.sh', () => {

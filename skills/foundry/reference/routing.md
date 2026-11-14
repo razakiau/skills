@@ -29,7 +29,7 @@ For each entry with `done: false`, read `when` against the repo as it is now and
 - `at the first change that touches two modules`: has come when the planned change spans two modules.
 - `on entering live`: has come when the stage is moving to `live`.
 
-When unsure, say the moment may have come and let the owner decide.
+When unsure, say the moment may have come and let the owner decide. Once an interview is done, mark it with `node <skill dir>/scripts/foundry.mjs state --set queue.done=<interview>` (`queue.open=<interview>` reopens it); never edit the queue by hand.
 Done: each open entry is marked as come or not yet, with one line of evidence.
 
 ### 3. Report

@@ -6,7 +6,7 @@ Garden reports. It changes no code and opens nothing without the owner's yes.
 
 ### 1. Read the range
 
-Run `node <skill dir>/scripts/foundry.mjs garden-range`. It prints `garden-range: <from>..<to> (<n> commits)`: the commits since `garden_last` in the state, or the last 50 when `garden_last` is null. With fewer than 50 commits, `<from>` is git's empty tree, so the range holds every commit, the first one included.
+Run `node <skill dir>/scripts/foundry.mjs garden-range`. It prints `garden-range: <from>..<to> (<n> commits)`: the commits since `garden_last` in the state, or, when `garden_last` is null, everything since 50 steps back along the first-parent line (`HEAD~50`). Merged branches bring their own commits into that range, so `<n>` can be well over 50; it is the true count. With fewer than 50 steps of history, `<from>` is git's empty tree, so the range holds every commit, the first one included.
 Then read the diff with `git diff <from>..<to>` and the messages with `git log <from>..<to>`.
 Done: you have read every commit in the range, or you said it holds none.
 

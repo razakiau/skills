@@ -1,5 +1,5 @@
 #!/bin/sh
-# foundry doc-check v1.3.0
+# foundry doc-check v1.4.0
 #
 # Checks the agent docs of a repo: links, commands, decisions, the AGENTS.md
 # budget, stage-required files and the precedence sentence.
@@ -28,11 +28,9 @@ stage=$(state_value stage)
 has_ui=$(state_value has_ui)
 budget=$(state_value budget_lines)
 md_state=$(state_value state)
-design_md=$(state_value design_md)
 state_unread=
 if [ -f "$STATE_FILE" ] && [ -z "$stage" ]; then state_unread=1; fi
 [ -n "$stage" ] || stage=explore
-[ -n "$design_md" ] || design_md=DESIGN.md
 [ -n "$budget" ] || budget=100
 [ -n "$md_state" ] || md_state=migrated
 case $budget in
@@ -41,6 +39,30 @@ esac
 
 soft=FAIL
 if [ "$md_state" = unmigrated ]; then soft=WARN; fi
+
+# Where the state records a required doc, else its default place. Must match PATH_KEYS in foundry.mjs.
+recorded() {
+  case $1 in
+    PRODUCT.md) key=product_md ;;
+    docs/decisions/index.md) key=decisions_index ;;
+    GLOSSARY.md) key=glossary_md ;;
+    ARCHITECTURE.md) key=architecture_md ;;
+    docs/code-map.md) key=code_map ;;
+    DESIGN.md) key=design_md ;;
+    docs/ui/screens.md) key=screens_md ;;
+    CONSTRAINTS.md) key=constraints_md ;;
+    docs/threat-model.md) key=threat_model ;;
+    docs/runbooks/) key=runbooks_dir ;;
+    *) echo "$1"; return 0 ;;
+  esac
+  v=$(state_value "$key")
+  if [ -n "$v" ]; then echo "$v"; else echo "$1"; fi
+}
+decisions_index=$(recorded docs/decisions/index.md)
+case $decisions_index in
+  */*) decisions_dir=${decisions_index%/*} ;;
+  *) decisions_dir=. ;;
+esac
 
 finding() {
   echo "doc-check: $1 $2: $3"
@@ -73,7 +95,7 @@ is_decision_name() {
 }
 
 check_links() {
-  for doc in AGENTS.md PRODUCT.md ARCHITECTURE.md GLOSSARY.md docs/decisions/index.md; do
+  for doc in AGENTS.md "$(recorded PRODUCT.md)" "$(recorded ARCHITECTURE.md)" "$(recorded GLOSSARY.md)" "$decisions_index"; do
     [ -f "$root/$doc" ] || continue
     case $doc in
       */*) dir=${doc%/*} ;;
@@ -84,7 +106,7 @@ check_links() {
         '' | http:* | https:* | mailto:*) continue ;;
       esac
       # Decision files linked from the index belong to the decisions rule.
-      if [ "$doc" = docs/decisions/index.md ] && is_decision_name "${target#./}"; then continue; fi
+      if [ "$doc" = "$decisions_index" ] && is_decision_name "${target#./}"; then continue; fi
       case $target in
         /*) path="$root$target" ;;
         *) path="$root/$dir/$target" ;;
@@ -95,9 +117,9 @@ check_links() {
 }
 
 check_decisions() {
-  ddir="$root/docs/decisions"
+  ddir="$root/$decisions_dir"
   [ -d "$ddir" ] || return 0
-  index="$ddir/index.md"
+  index="$root/$decisions_index"
   linked=''
   if [ -f "$index" ]; then
     linked=$(link_targets "$index" | sed 's|^\./||')
@@ -107,13 +129,13 @@ check_decisions() {
     name=${f##*/}
     [ "$name" = 0000-template.md ] && continue
     if ! printf '%s\n' "$linked" | grep -Fqx -- "$name"; then
-      finding FAIL decisions "docs/decisions/$name not linked from docs/decisions/index.md"
+      finding FAIL decisions "$decisions_dir/$name not linked from $decisions_index"
     fi
   done
   printf '%s\n' "$linked" | while IFS= read -r target; do
     is_decision_name "$target" || continue
     if [ ! -e "$ddir/$target" ]; then
-      finding FAIL decisions "docs/decisions/index.md -> $target missing"
+      finding FAIL decisions "$decisions_index -> $target missing"
     fi
   done
 }
@@ -197,8 +219,8 @@ check_agents_md() {
   fi
 }
 
-# Must match REQUIRED in foundry.mjs, in the same order. DESIGN.md stands for
-# the recorded design_md path. The code map still counts at its old place,
+# Must match REQUIRED in foundry.mjs, in the same order. Each file stands for
+# its recorded path, when the state records one. The code map still counts at its old place,
 # .agents/code-map.md, with a WARN to move it.
 check_required() {
   if [ -n "$state_unread" ]; then
@@ -218,7 +240,7 @@ check_required() {
   esac
   for f in $required; do
     case $f in DESIGN.md | docs/ui/screens.md) if [ "$has_ui" != true ]; then continue; fi ;; esac
-    if [ "$f" = DESIGN.md ]; then f=$design_md; fi
+    f=$(recorded "$f")
     if [ "$f" = docs/code-map.md ] && [ ! -f "$root/$f" ] && [ -f "$root/.agents/code-map.md" ]; then
       finding WARN required ".agents/code-map.md is the old place for the code map; move it with git mv .agents/code-map.md docs/code-map.md"
       continue
