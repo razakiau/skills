@@ -112,7 +112,7 @@ There are four stages: `explore`, `product`, `live` and `scale`. Each one keeps 
 | `audit` | Reports what the repository has and lacks for its stage, readiness list included. Writes nothing. |
 | `grow` | Moves to the next stage and adds what it requires. |
 | `providers` | Maps each kind of work to a skill or tool the agent already has, or to foundry's fallback. |
-| `check` | Runs the repository's one check command, doc check included, and says who owns each failure. |
+| `check` | Runs the repository's one check command, doc check included, and says who owns each failure. The check grows rung by rung: types, lint, complexity, size, unused code, duplication, module boundaries ([`reference/ladder.md`](skills/foundry/reference/ladder.md)). |
 | `garden` | Reads the commits since the last pass for drift: copied workarounds, duplicated helpers, rules broken with no check failing. |
 | `tune` | Proposes AGENTS.md edits from what agents did in 10 or more real sessions, each with a quote. |
 
@@ -121,6 +121,8 @@ To start, ask the agent to set the repository up for agents, or to audit its set
 Foundry never installs a skill or MCP server. It names the provider, why, a link and its license, and you decide.
 
 Some interviews wait for their moment: a design interview before the first screen, a threat model on entering `live`. They sit in a queue in the state file.
+
+The doc check keeps the maps honest: it fails when the code map or the screen map names a path that no longer exists, and warns when a source folder is missing from the code map or when more than 50 commits passed since the last `garden`. A doc kept somewhere else, such as `web/DESIGN.md`, is recorded once with `state --set design_md=web/DESIGN.md` and every check reads it there.
 
 A repository with UI also gets a screen map at `product`: `docs/ui/screens.md`, the same file [`check-screens`](#check-screens) keeps, and the AGENTS.md line that sends agents to it after a UI change. `garden` reports stale screens when check-screens is installed.
 
@@ -132,7 +134,11 @@ With the plugin installed, a hook prints one line when a session starts in a rep
 foundry: 5 missing for product (PRODUCT.md, docs/decisions/index.md), 2 interview(s) queued; run foundry to see them.
 ```
 
-When nothing is missing and no interview is queued, or the repository has no state file, it prints nothing. It only checks that files exist, and on any error it stays silent.
+When nothing is missing and no interview is queued, or the repository has no state file, it prints nothing. It only checks that files exist, and on any error it stays silent. It works in Claude Code and GitHub Copilot CLI.
+
+### The commit gate
+
+From `product` on, the plugin also refuses an agent's `git commit` until the check has passed on the same files. `foundry.mjs gate` runs the check and, when it passes, records a hash of the working tree. A PreToolUse hook compares that hash before each `git commit` an agent runs and denies the call when they differ, naming the command to run. It only hashes, so it adds no time to the commit. CI running the same check on every PR stays the gate nobody can skip; `init` says when no workflow runs it. `state --set gate=off` turns the hook off for a repository.
 
 ### Requirements
 

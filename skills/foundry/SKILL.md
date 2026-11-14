@@ -3,13 +3,13 @@ name: foundry
 description: Use first, before any brainstorming or planning, when starting a new project, setting a repo up for agents, auditing a repo's agent setup, or asking if it is ready for real users or what is missing before launch. It sets the repo's stage and docs. A plain feature or bug request skips it.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Foundry
 
 A repo grows through four stages: `explore`, `product`, `live` and `scale` ([reference/stages.md](reference/stages.md)). Each stage requires its own files, from AGENTS.md at the start to a threat model and runbooks once real users arrive.
-Foundry records the stage in `.agents/foundry.json`, writes what the stage lacks, maps each kind of work ([reference/themes.md](reference/themes.md)) to a provider the agent already has ([reference/providers.md](reference/providers.md)), and audits the repo against the readiness list ([reference/readiness.md](reference/readiness.md)).
+Foundry records the stage in `.agents/foundry.json`, writes what the stage lacks, maps each kind of work ([reference/themes.md](reference/themes.md)) to a provider the agent already has ([reference/providers.md](reference/providers.md)), audits the repo against the readiness list ([reference/readiness.md](reference/readiness.md)), and grows the check rung by rung ([reference/ladder.md](reference/ladder.md)).
 It proposes; the owner decides. Nothing in AGENTS.md or CI changes without the owner's yes.
 
 ## Setup

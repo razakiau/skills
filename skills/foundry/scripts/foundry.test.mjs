@@ -115,7 +115,7 @@ test('state: rejects bad values and unknown keys, exit 2', () => {
     ['has_ui=yes', 'foundry: has_ui must be true or false\n'],
     ['readiness_tier=x', 'foundry: readiness_tier must be a whole number\n'],
     ['agents_md.state=old', 'foundry: agents_md.state must be one of migrated, unmigrated\n'],
-    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md\n'],
+    ['version=2', 'foundry: --set accepts stage, stage_reason, readiness_tier, agents_md.state, has_ui, design_md, product_md, decisions_index, glossary_md, architecture_md, code_map, screens_md, constraints_md, threat_model, runbooks_dir, check_command, gate, queue.done, queue.open\n'],
     ['stage', 'foundry: --set needs key=value\n'],
   ]) {
     const r = run(repo, ['state', '--set', arg]);
@@ -316,7 +316,7 @@ test('signals: age and PRODUCT.md propose product', () => {
 
 test('signals: deploy workflow + auth proposes live', () => {
   const repo = makeRepo({
-    '.github/workflows/ci.yml': 'steps:\n  - uses: docker/build-push-action@v6\n',
+    '.github/workflows/ci.yml': 'jobs:\n  deploy:\n    steps:\n      - run: flyctl deploy\n',
     'src/auth/login.ts': 'export {}\n',
   });
   const s = signals(repo, NO_SESSIONS);
@@ -328,27 +328,38 @@ test('signals: deploy workflow + auth proposes live', () => {
   assert.deepEqual(Object.keys(s.files), REQUIRED.live.filter((f) => !UI_ONLY.includes(f)));
 });
 
-test('signals: deploy evidence kinds; deployed alone is not live', () => {
+test('signals: packaging is not deploying, and only a hosted or live link in the README is', () => {
   const repo = makeRepo({
     'compose.yaml': 'services:\n  web:\n    ports:\n      - "80:80"\n',
     'docker-compose.yml': 'services: {}\n',
     'Dockerfile': 'FROM node\n',
-    'README.md': 'See https://github.com/x/y and https://app.example.com\n',
+    'README.md': 'Built with https://mise.jdx.dev and https://github.com/x/y. Data from https://www.opensanctions.org/.\nSee https://example.org/page.\n',
     '.github/workflows/test.yml': 'run: npm test\n',
+    '.github/workflows/image.yml': 'steps:\n  - uses: docker/build-push-action@v6\n    with: { tags: ghcr.io/x/y }\n',
+    'src/auth/login.ts': 'x',
   });
   const s = signals(repo, NO_SESSIONS);
-  assert.deepEqual(s.deployed, ['compose.yaml', 'Dockerfile', 'README.md: https://app.example.com']);
+  assert.deepEqual(s.deployed, []);
+  assert.deepEqual(s.packaged, ['.github/workflows/image.yml', 'compose.yaml', 'Dockerfile']);
+  assert.ok(s.reasons.includes('packaged, not a deploy: Dockerfile'), s.reasons.join('; '));
   assert.equal(s.proposed, 'explore');
-  const users = makeRepo({ 'Dockerfile': 'FROM node\n', 'README.md': 'Built for our users.\n' });
+  const hosted = signals(makeRepo({ 'README.md': 'Try it: https://notes-pilot.vercel.app\n' }), NO_SESSIONS);
+  assert.deepEqual(hosted.deployed, ['README.md: https://notes-pilot.vercel.app']);
+  const said = signals(makeRepo({ 'README.md': 'Docs: https://docs.rs/x\nThe live app is at https://tracker.acme.net/app\n' }), NO_SESSIONS);
+  assert.deepEqual(said.deployed, ['README.md: https://tracker.acme.net/app'], 'a line that says live');
+  const users = makeRepo({ 'README.md': 'The live app: https://app.acme.io\nBuilt for our users.\n' });
   const u = signals(users, NO_SESSIONS);
   assert.equal(u.proposed, 'live');
   assert.ok(u.reasons.includes('README names users'), u.reasons.join('; '));
+  const word = signals(makeRepo({ 'README.md': 'Live at https://app.acme.io\nUsers can sign in.\n' }), NO_SESSIONS);
+  assert.notEqual(word.proposed, 'live', 'the word users alone does not name users');
 });
 
 test('signals: auth_code lists the first 5', () => {
-  const files = { 'node_modules/auth/x.js': 'x' };
+  const files = { 'node_modules/auth/x.js': 'x', 'design/state-permission-denied.png': 'x', 'docs/auth.ts': 'x', 'auth-notes.md': 'x' };
   for (const n of ['auth', 'session', 'login', 'tenant', 'rbac', 'permission']) files[`src/${n}.ts`] = 'x';
   const s = signals(makeRepo(files), NO_SESSIONS);
+  assert.deepEqual(signals(makeRepo({ 'shots/login.png': 'x', 'docs/auth.ts': 'x' }), NO_SESSIONS).auth_code, [], 'images and docs are not auth code');
   assert.equal(s.auth_code.length, 5);
   assert.ok(s.auth_code.every((p) => p.startsWith('src/')));
 });
@@ -614,6 +625,54 @@ test('doc-check: unmigrated still fails link, command, decisions, required', () 
   }
 });
 
+test('doc-check: a map citing a path that is gone fails; prose only warns; relative, ignored, outside and retired paths pass', () => {
+  const r = docCheck(docRepo({
+    'src/harness/proxy.rs': 'x',
+    'web/docs/acceptance/a.md': 'x',
+    '.gitignore': 'data/\n',
+    'data/.keep': null,
+    'docs/code-map.md': [
+      '# Map', '',
+      '| `src/harness/` | sidecar, see `harness/proxy.rs` |',
+      '| `docs/acceptance/` | acceptance notes, under web/ |',
+      '| `src/gone.ts` | was here |',
+      'Image `ghcr.io/x/y`, secrets in `run/secrets`, db at `data/app.db`, glob `src/*.rs`, cmd `npm run x`.',
+      'Retired 2026-01-01 and deleted with `src/old.ts`.',
+      '```sh', 'cat src/fenced.ts', '```', '',
+    ].join('\n'),
+    'AGENTS.md': AGENTS_OK + '\nSee `src/missing.md` and `docs/elsewhere.md`.\n',
+  }));
+  assert.deepEqual(findings(r, 'path'), [
+    'doc-check: FAIL path: docs/code-map.md cites src/gone.ts, which does not exist',
+    'doc-check: WARN path: AGENTS.md cites docs/elsewhere.md, which does not exist',
+    'doc-check: WARN path: AGENTS.md cites src/missing.md, which does not exist',
+  ]);
+  assert.equal(r.code, 1);
+});
+
+test('doc-check: a source folder the code map never names warns', () => {
+  const r = docCheck(docRepo({
+    'src/capture/a.ts': 'x', 'src/style/b.ts': 'x', 'src/node_modules/c.js': 'x', 'ui/src/views/v.ts': 'x',
+    'docs/code-map.md': '# Map\n\n- `src/capture/`: capture\n',
+  }));
+  assert.deepEqual(findings(r, 'code-map'), [
+    'doc-check: WARN code-map: src/style is not named in docs/code-map.md',
+    'doc-check: WARN code-map: ui/src/views is not named in docs/code-map.md',
+  ]);
+  assert.equal(r.code, 0);
+});
+
+test('doc-check: more than 50 commits since the last garden pass, or since the stage was set, warns', () => {
+  const repo = docRepo({}, { stage_set: '2000-01-01' });
+  for (let i = 0; i < 50; i++) git(repo, 'commit', '-q', '--allow-empty', '-m', `c${i}`);
+  assert.deepEqual(findings(docCheck(repo), 'garden'), ['doc-check: WARN garden: 51 commits since the stage was set (2000-01-01), with no garden pass yet; run foundry garden']);
+  const head = git(repo, 'rev-parse', 'HEAD');
+  write(repo, '.agents/foundry.json', JSON.stringify(docState({ stage_set: '2000-01-01', garden_last: head }), null, 2) + '\n');
+  assert.deepEqual(findings(docCheck(repo), 'garden'), [], 'a pass at HEAD');
+  const young = docRepo({}, { stage_set: '2000-01-01' });
+  assert.deepEqual(findings(docCheck(young), 'garden'), []);
+});
+
 test('doc-check: runs under dash', (t) => {
   const shell = ['/bin/dash', '/usr/bin/dash'].find((p) => existsSync(p));
   const busybox = !shell && spawnSync('busybox', ['sh', '-c', 'true']).status === 0;
@@ -819,6 +878,48 @@ test('init-files: a recorded design_md is linked, and DESIGN.md is not asked for
   assert.equal(bad.code, 2);
   assert.equal(run(repo, ['state', '--set', 'design_md=web/notes.md']).code, 2);
   for (const v of ['web/OLDDESIGN.md', 'xDESIGN.md', '/abs/DESIGN.md', './DESIGN.md', 'web/./DESIGN.md']) assert.equal(run(repo, ['state', '--set', `design_md=${v}`]).code, 2, v);
+});
+
+test('init-files --at: docs kept elsewhere are recorded, never written at the top, and doc-check reads them there', () => {
+  const repo = makeRepo({
+    'docs/product/PRODUCT.md': '# P\n\nSee [decisions](decisions/README.md).\n',
+    'docs/product/decisions/README.md': '# D\n\n- [one](0001-one.md)\n',
+    'docs/product/decisions/0001-one.md': '# 0001\n',
+  });
+  const r = init(repo, '--stage', 'product', '--at', 'PRODUCT.md=docs/product/PRODUCT.md', '--at', 'docs/decisions/index.md=docs/product/decisions/README.md');
+  assert.equal(r.code, 0, r.stderr);
+  const out = r.stdout.split('\n');
+  assert.ok(out.includes('kept docs/product/PRODUCT.md (recorded for PRODUCT.md)'), r.stdout);
+  assert.ok(out.includes('created docs/product/decisions/0000-template.md'), r.stdout);
+  for (const f of ['PRODUCT.md', 'docs/decisions']) assert.ok(!exists(repo, f), `${f} not written at its default place`);
+  const s = readState(repo);
+  assert.deepEqual([s.product_md, s.decisions_index], ['docs/product/PRODUCT.md', 'docs/product/decisions/README.md']);
+  assert.ok(read(repo, 'AGENTS.md').includes('docs/product/PRODUCT.md'), 'AGENTS.md links the recorded place');
+  const check = repoCheck(repo);
+  assert.deepEqual(check.lines.filter((l) => /PRODUCT|decisions|link/.test(l)), [], check.stdout);
+  assert.ok(check.lines.includes('doc-check: FAIL required: docs/code-map.md'), 'the code map comes from its interview, as before');
+  write(repo, 'docs/product/decisions/0002-two.md', '# 0002\n');
+  assert.ok(repoCheck(repo).lines.includes('doc-check: FAIL decisions: docs/product/decisions/0002-two.md not linked from docs/product/decisions/README.md'));
+  write(repo, 'docs/product/PRODUCT.md', '# P\n\nSee [gone](nope.md).\n');
+  assert.ok(repoCheck(repo).lines.includes('doc-check: FAIL link: docs/product/PRODUCT.md -> nope.md'), 'links are checked at the recorded place');
+  assert.equal(foundry.hookLine(repo), 'foundry: 1 missing for product (docs/code-map.md), 0 interview(s) queued; run foundry to see them.\n', 'the hook looks at the recorded place');
+  assert.equal(init(makeRepo(), '--stage', 'product', '--at', 'AGENTS.md=x/AGENTS.md').code, 2, 'AGENTS.md stays at the top');
+  assert.equal(init(makeRepo(), '--stage', 'product', '--at', 'PRODUCT.md=../P.md').code, 2);
+});
+
+test('state --set: doc paths are checked, and a queued interview is marked by name', () => {
+  const repo = withState({ ...STATE, queue: [{ interview: 'code map', when: 'x', done: false }, { interview: 'Glossary', when: 'y', done: false }] });
+  for (const v of ['/abs.md', 'a/../b.md', 'notes.txt', 'a b.md', 'x,y.md']) assert.equal(run(repo, ['state', '--set', `product_md=${v}`]).code, 2, v);
+  assert.equal(run(repo, ['state', '--set', 'runbooks_dir=ops/runbooks']).code, 2, 'a folder ends in /');
+  assert.equal(run(repo, ['state', '--set', 'runbooks_dir=ops/runbooks/']).code, 0);
+  const r = run(repo, ['state', '--set', 'queue.done= glossary ']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [false, true]);
+  run(repo, ['state', '--set', 'queue.open=Glossary', '--set', 'queue.done=code map']);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [true, false]);
+  const bad = run(repo, ['state', '--set', 'queue.done=design']);
+  assert.deepEqual([bad.code, bad.stderr], [2, 'foundry: no single queued interview named "design"; the queue holds: code map; Glossary\n']);
+  assert.deepEqual(readState(repo).queue.map((q) => q.done), [true, false], 'nothing written on error');
 });
 
 test('init-files: rust repo without runner gets .agents/check.sh', () => {
@@ -1129,11 +1230,11 @@ test('refs: readiness.md has three tiers checked by script, test or review', () 
   for (const r of tables.flat()) assert.match(r[1], /^(script|test|review)\b/, `${r[0]}: ${r[1]}`);
 });
 
-const KNOWLEDGE_REFS = ['providers.md', 'readiness.md', 'stages.md', 'themes.md'];
+const KNOWLEDGE_REFS = ['ladder.md', 'providers.md', 'readiness.md', 'stages.md', 'themes.md'];
 const COMMAND_REFS = ['routing.md', 'init.md', 'audit.md', 'grow.md', 'providers-cmd.md', 'check.md', 'garden.md', 'tune.md'];
 
 test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.md names a real command', () => {
-  assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook']);
+  assert.deepEqual(foundry.COMMANDS, ['state', 'signals', 'init-files', 'vendor-check', 'digest', 'garden-range', 'hook', 'gate', 'commit-hook']);
   const named = new Set();
   const files = new Set();
   for (const f of readdirSync(REFS).filter((n) => n.endsWith('.md'))) {
@@ -1144,8 +1245,8 @@ test('refs: every \'node <skill dir>/scripts/foundry.mjs <cmd>\' in reference/*.
     }
   }
   for (const f of COMMAND_REFS) assert.ok(files.has(f), `${f} names a foundry command`);
-  // hook runs from the installed git hook, never from a reference step.
-  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook')) assert.ok(named.has(c), `some reference runs ${c}`);
+  // hook and commit-hook run from the plugin's hooks, never from a reference step.
+  for (const c of foundry.COMMANDS.filter((c) => c !== 'hook' && c !== 'commit-hook')) assert.ok(named.has(c), `some reference runs ${c}`);
 });
 
 test('refs: every relative link in reference/*.md resolves', () => {
@@ -1181,7 +1282,7 @@ test('vendor-check prints created/current', () => {
   assert.equal(read(repo, '.agents/doc-check.sh'), readFileSync(DOC_CHECK, 'utf8'));
   const bad = run(repo, ['vendor-check', '--x']);
   assert.deepEqual([bad.stderr, bad.code], ['foundry: unknown argument --x\n', 2]);
-  assert.match(run(repo, []).stderr, /\| vendor-check \| digest \[--limit N\] \[--json\] \| garden-range \[--mark\] \[--json\] \| hook\n$/);
+  assert.match(run(repo, []).stderr, /\| vendor-check \| digest \[--limit N\] \[--json\] \| garden-range \[--mark\] \[--json\] \| hook \| gate \| commit-hook\n$/);
 });
 
 test('refs: the provider steps read the local overlay, and its example exists', () => {
@@ -1391,20 +1492,24 @@ const HOOK_LINE = /^foundry: \d+ missing for product \(.+\), \d+ interview\(s\) 
 const ROOT = join(dirname(FOUNDRY), '..', '..', '..');
 const SKILL = join(dirname(FOUNDRY), '..', 'SKILL.md');
 const PRODUCT_DOCS = ['AGENTS.md', 'PRODUCT.md', 'docs/decisions/index.md', 'GLOSSARY.md', 'ARCHITECTURE.md', 'docs/code-map.md', 'CONSTRAINTS.md'];
+// Claude Code's env: plain stdout is the context. Copilot sets COPILOT_CLI and reads JSON.
+const CLAUDE_ENV = { CLAUDE_PLUGIN_ROOT: '/plugin', COPILOT_CLI: '' };
+const COPILOT_ENV = { CLAUDE_PLUGIN_ROOT: '/plugin', COPILOT_CLI: '1' };
+const hookRun = (repo) => run(repo, ['hook'], undefined, CLAUDE_ENV);
 const hookRepo = (state, files = []) => makeRepo({
   '.agents/foundry.json': JSON.stringify({ ...STATE, ...state }, null, 2) + '\n',
   ...Object.fromEntries(files.map((f) => [f, 'x\n'])),
 });
 
 test('hook: silent without foundry.json', () => {
-  const r = run(makeRepo(), ['hook']);
+  const r = hookRun(makeRepo());
   assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0]);
 });
 
 test('hook: silent when complete', () => {
-  const r = run(hookRepo({ stage: 'explore', queue: [{ interview: 'design', when: 'later', done: true }] }, ['AGENTS.md']), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'explore', queue: [{ interview: 'design', when: 'later', done: true }] }, ['AGENTS.md']));
   assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0]);
-  const product = run(hookRepo({ stage: 'product' }, PRODUCT_DOCS), ['hook']);
+  const product = hookRun(hookRepo({ stage: 'product' }, PRODUCT_DOCS));
   assert.deepEqual([product.stdout, product.code], ['', 0]);
 });
 
@@ -1414,7 +1519,7 @@ test('hook: one line when product files missing', () => {
     { interview: 'threat', when: 'on entering live', provider: 'shannon', done: false },
     { interview: 'old', when: 'x', done: true },
   ];
-  const r = run(hookRepo({ stage: 'product', queue }, ['AGENTS.md', 'GLOSSARY.md']), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'product', queue }, ['AGENTS.md', 'GLOSSARY.md']));
   assert.match(r.stdout, HOOK_LINE);
   assert.equal(r.stdout, 'foundry: 5 missing for product (PRODUCT.md, docs/decisions/index.md), 2 interview(s) queued; run foundry to see them.\n');
   assert.deepEqual([r.stderr, r.code], ['', 0]);
@@ -1422,34 +1527,34 @@ test('hook: one line when product files missing', () => {
 
 test('hook: one missing names it alone; DESIGN.md counts only when the state has UI', () => {
   const docs = PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md');
-  const one = run(hookRepo({ stage: 'product' }, docs), ['hook']);
+  const one = hookRun(hookRepo({ stage: 'product' }, docs));
   assert.equal(one.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
-  const ui = run(hookRepo({ stage: 'product', has_ui: true }, PRODUCT_DOCS), ['hook']);
+  const ui = hookRun(hookRepo({ stage: 'product', has_ui: true }, PRODUCT_DOCS));
   assert.equal(ui.stdout, 'foundry: 2 missing for product (DESIGN.md, docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
-  const map = run(hookRepo({ stage: 'product', has_ui: true }, [...PRODUCT_DOCS, 'DESIGN.md']), ['hook']);
+  const map = hookRun(hookRepo({ stage: 'product', has_ui: true }, [...PRODUCT_DOCS, 'DESIGN.md']));
   assert.equal(map.stdout, 'foundry: 1 missing for product (docs/ui/screens.md), 0 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: nothing missing but an open interview prints (none)', () => {
-  const r = run(hookRepo({ stage: 'product', queue: [{ interview: 'design', when: 'x', done: false }] }, PRODUCT_DOCS), ['hook']);
+  const r = hookRun(hookRepo({ stage: 'product', queue: [{ interview: 'design', when: 'x', done: false }] }, PRODUCT_DOCS));
   assert.match(r.stdout, HOOK_LINE);
   assert.equal(r.stdout, 'foundry: 0 missing for product (none), 1 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: live counts docs/runbooks/ only as a directory', () => {
   const repo = hookRepo({ stage: 'live' }, [...PRODUCT_DOCS, 'docs/threat-model.md', 'docs/runbooks']);
-  assert.equal(run(repo, ['hook']).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
+  assert.equal(hookRun(repo).stdout, 'foundry: 1 missing for live (docs/runbooks/), 0 interview(s) queued; run foundry to see them.\n');
 });
 
 test('hook: from a subfolder and from a linked worktree it finds the repo top without git', () => {
   const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
   mkdirSync(join(repo, 'src', 'deep'), { recursive: true });
-  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: join(repo, 'src', 'deep'), encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   assert.equal(r.stdout, 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.\n');
   const wt = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-wt-'))) + '/w';
   git(repo, 'worktree', 'add', '-q', wt);
   assert.equal(foundry.nearestTop(join(wt)), wt);
-  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const w = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: wt, encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   assert.equal(w.stdout, r.stdout);
 });
 
@@ -1457,14 +1562,36 @@ test('hook: any error exits 0 and prints nothing', () => {
   const corrupt = makeRepo({ '.agents/foundry.json': '{ not json' });
   for (const state of [null, { stage: 'nope' }, { stage: 'product', queue: 'x' }]) {
     const repo = state ? hookRepo(state) : corrupt;
-    const r = run(repo, ['hook']);
+    const r = hookRun(repo);
     assert.deepEqual([r.stdout, r.stderr, r.code], ['', '', 0], JSON.stringify(state));
   }
   const bare = realpathSync(mkdtempSync(join(tmpdir(), 'foundry-test-')));
   write(bare, '.agents/foundry.json', '[]');
-  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: bare, encoding: 'utf8', env: { ...process.env, PATH: '/nonexistent' } });
+  const r = spawnSync(process.execPath, [FOUNDRY, 'hook'], { cwd: bare, encoding: 'utf8', env: { ...process.env, ...CLAUDE_ENV, PATH: '/nonexistent' } });
   const nogit = { stdout: r.stdout, stderr: r.stderr, code: r.status };
   assert.deepEqual([nogit.stdout, nogit.stderr, nogit.code], ['', '', 0]);
+});
+
+const ONE_MISSING = 'foundry: 1 missing for product (CONSTRAINTS.md), 0 interview(s) queued; run foundry to see them.';
+
+test('hook: Copilot gets JSON additionalContext, and reads the repo from the cwd on stdin', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  const elsewhere = makeRepo();
+  const input = JSON.stringify({ source: 'new', sessionId: 's', timestamp: 1, cwd: repo });
+  const r = run(elsewhere, ['hook'], input, COPILOT_ENV);
+  assert.deepEqual([r.stdout, r.stderr, r.code], [JSON.stringify({ additionalContext: ONE_MISSING }) + '\n', '', 0]);
+  const plain = run(elsewhere, ['hook'], undefined, COPILOT_ENV);
+  assert.deepEqual([plain.stdout, plain.code], ['', 0], 'no stdin: process cwd, which has no state');
+});
+
+test('hook: Claude Code gets the plain line, by stdin or by env; a vanished cwd falls back to the process cwd', () => {
+  const repo = hookRepo({ stage: 'product' }, PRODUCT_DOCS.filter((f) => f !== 'CONSTRAINTS.md'));
+  const claude = run(repo, ['hook'], JSON.stringify({ hook_event_name: 'SessionStart', cwd: repo }), COPILOT_ENV);
+  assert.equal(claude.stdout, ONE_MISSING + '\n');
+  const gone = run(repo, ['hook'], JSON.stringify({ cwd: join(repo, 'nope') }), CLAUDE_ENV);
+  assert.equal(gone.stdout, JSON.stringify({ additionalContext: ONE_MISSING }) + '\n', 'stdin without hook_event_name is Copilot');
+  assert.equal(run(repo, ['hook'], 'not json', CLAUDE_ENV).stdout, ONE_MISSING + '\n');
+  assert.equal(foundry.hookOutput('x\n', {}, {}), '{"additionalContext":"x"}\n', 'unknown host: the SDK standard');
 });
 
 function frontmatter(md) {
@@ -1486,7 +1613,7 @@ test('skill: description ≤ 300 chars and names start/audit/ready', () => {
   const fm = frontmatter(readFileSync(SKILL, 'utf8'));
   assert.equal(fm.name, 'foundry');
   assert.equal(fm.license, 'MIT');
-  assert.equal(fm['metadata.version'], '1.1.0');
+  assert.equal(fm['metadata.version'], '1.2.0');
   assert.ok(fm.description.length <= 300, `description has ${fm.description.length} chars`);
   for (const re of [/project/, /audit/, /ready/]) assert.match(fm.description, re);
   assert.match(fm.description, /feature|bug/, 'says what skips it');
@@ -1506,14 +1633,17 @@ test('skill: SKILL.md under 80 lines, every link resolves', () => {
   prose.split('\n').forEach((line, i) => assert.doesNotMatch(line, /[\u2014\u2013]| -- /, `SKILL.md:${i + 1}`));
 });
 
-test('hooks.json is valid JSON and keeps the four existing strategic-programming hooks', () => {
+test('hooks.json is valid JSON, keeps the strategic-programming hooks and carries foundry\'s two', () => {
   const { hooks } = JSON.parse(readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8'));
   const sp = (verb) => `node "\${CLAUDE_PLUGIN_ROOT}/skills/strategic-programming/scripts/sp.mjs" ${verb}`;
-  assert.deepEqual(hooks.UserPromptSubmit, [{ hooks: [{ type: 'command', command: sp('turn'), timeout: 10 }] }]);
-  assert.deepEqual(hooks.PreToolUse, [{ matcher: 'ask_user', hooks: [{ type: 'command', command: sp('ask'), timeout: 30 }] }]);
-  assert.deepEqual(hooks.PostToolUse, [{ matcher: 'ask_user', hooks: [{ type: 'command', command: sp('asked'), timeout: 10 }] }]);
-  assert.deepEqual(hooks.Stop, [{ hooks: [{ type: 'command', command: sp('hook'), timeout: 30 }] }]);
-  assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/skills/foundry/scripts/foundry.mjs" hook', timeout: 10 }] }]);
+  const fd = (verb) => `node "\${CLAUDE_PLUGIN_ROOT}/skills/foundry/scripts/foundry.mjs" ${verb}`;
+  const commands = (event) => (hooks[event] ?? []).flatMap((m) => m.hooks.map((h) => h.command));
+  for (const [event, verb] of [['UserPromptSubmit', 'turn'], ['PreToolUse', 'ask'], ['PostToolUse', 'asked'], ['PostToolUse', 'edited'], ['Stop', 'hook']]) {
+    assert.ok(commands(event).includes(sp(verb)), `${event} ${verb}`);
+  }
+  assert.deepEqual(hooks.SessionStart, [{ hooks: [{ type: 'command', command: fd('hook'), timeout: 10 }] }]);
+  const gate = hooks.PreToolUse.find((m) => m.hooks.some((h) => h.command === fd('commit-hook')));
+  assert.deepEqual(gate, { matcher: 'bash|Bash|run_in_terminal|powershell|shell', hooks: [{ type: 'command', command: fd('commit-hook'), timeout: 30 }] });
 });
 
 test('packaging: README and plugin descriptions name all three skills', () => {
@@ -1525,4 +1655,89 @@ test('packaging: README and plugin descriptions name all three skills', () => {
     const desc = f === 'plugin.json' ? json.description : json.plugins[0].description;
     for (const name of ['no-slop', 'strategic-programming', 'foundry']) assert.ok(desc.includes(name), `${f}: ${name}`);
   }
+});
+
+// ---- gate ----
+
+const gateRepo = (state = {}, files = {}) => makeRepo({
+  '.agents/foundry.json': JSON.stringify({ ...STATE, stage: 'product', check_command: 'sh ok.sh', ...state }, null, 2) + '\n',
+  'ok.sh': 'exit 0\n', 'src/a.ts': 'a\n', '.gitignore': 'out/\n', ...files,
+});
+const copilotCommit = (cwd, command = 'git commit -qm x') => ({ sessionId: 's', cwd, toolName: 'bash', toolArgs: JSON.stringify({ command, description: 'commit' }) });
+
+test('gate: a commit is refused until the check passed on exactly these files', () => {
+  const repo = gateRepo();
+  const none = foundry.gateReason(copilotCommit(repo), '/f.mjs');
+  assert.match(none, /^foundry gate: the files in .+ changed since `sh ok\.sh` last passed there \(no pass recorded\)\. Run `node "\/f\.mjs" gate` from the repo/);
+  const g = run(repo, ['gate']);
+  assert.equal(g.code, 0, g.stderr);
+  assert.match(g.stdout, /^gate: sh ok\.sh passed on [0-9a-f]{7}; commits of this state are allowed\n$/);
+  assert.equal(foundry.gateReason(copilotCommit(repo)), null);
+  write(repo, 'out/build.js', 'x');
+  assert.equal(foundry.gateReason(copilotCommit(repo)), null, 'ignored files do not count');
+  write(repo, 'src/new.ts', 'x');
+  assert.match(foundry.gateReason(copilotCommit(repo)), /changed since `sh ok\.sh` last passed there\. Run/, 'an untracked file counts');
+  run(repo, ['gate']);
+  write(repo, 'src/a.ts', 'edited\n');
+  assert.ok(foundry.gateReason(copilotCommit(repo)), 'an edit after the pass');
+  assert.equal(git(repo, 'status', '--porcelain').includes('src/a.ts'), true, 'the real index is untouched');
+  assert.equal(git(repo, 'diff', '--cached', '--name-only'), '');
+});
+
+test('gate: a failing or file-changing check records nothing', () => {
+  const red = gateRepo({}, { 'ok.sh': 'echo boom; exit 3\n' });
+  const r = run(red, ['gate']);
+  assert.deepEqual([r.code, r.stdout], [3, 'boom\ngate: sh ok.sh failed (exit 3); nothing recorded\n']);
+  assert.ok(foundry.gateReason(copilotCommit(red)));
+  const fmt = gateRepo({}, { 'ok.sh': 'echo formatted > src/a.ts\n' });
+  const f = run(fmt, ['gate']);
+  assert.deepEqual([f.code, f.stdout], [1, 'gate: sh ok.sh passed but changed files; review them and run gate again\n']);
+  assert.ok(foundry.gateReason(copilotCommit(fmt)));
+  assert.equal(run(makeRepo(), ['gate']).code, 1, 'no state');
+});
+
+test('gate: which commands and repos it applies to', () => {
+  const repo = gateRepo();
+  const elsewhere = makeRepo();
+  for (const cmd of [`cd ${repo} && git commit -m x`, `git -C ${repo} commit --amend --no-edit`, `cd "${repo}"; git add -A; git -c core.x=y commit -qm "y"`]) {
+    assert.ok(foundry.gateReason(copilotCommit(elsewhere, cmd)), cmd);
+  }
+  for (const cmd of ['GIT_AUTHOR_NAME=a git commit -m x', 'env X=1 git commit -m x', 'sudo git commit -m x', 'git commit -m "a; b"']) {
+    assert.ok(foundry.gateReason(copilotCommit(repo, cmd)), cmd);
+  }
+  for (const cmd of ['git log --oneline', 'git commit-tree HEAD^{tree}', 'echo git commit', `git -C ${repo} status`, 'echo "a; git commit"', "echo 'x && git commit'"]) {
+    assert.equal(foundry.gateReason(copilotCommit(repo, cmd)), null, cmd);
+  }
+  assert.ok(foundry.gateReason({ tool_name: 'Bash', tool_input: { command: 'git commit -m x' }, cwd: repo }), 'Claude Code payload');
+  assert.ok(foundry.gateReason({ cwd: repo, toolCalls: [{ name: 'view', args: {} }, { name: 'bash', args: { command: 'git commit -m x' } }] }), 'batched calls');
+  assert.equal(foundry.gateReason({ toolName: 'edit', toolArgs: { command: 'git commit' }, cwd: repo }), null, 'not a shell');
+  assert.equal(foundry.gateReason(copilotCommit(gateRepo({ stage: 'explore' }))), null, 'explore is not gated');
+  assert.equal(foundry.gateReason(copilotCommit(gateRepo({ gate: 'off' }))), null, 'gate off');
+  assert.equal(foundry.gateReason(copilotCommit(elsewhere)), null, 'no foundry state');
+  const unwired = gateRepo({ check_command: undefined });
+  assert.equal(foundry.gateReason(copilotCommit(unwired)), null, 'no check command, nothing to gate on');
+  const npm = gateRepo({ check_command: undefined }, { 'package.json': '{"scripts":{"check":"true"}}\n' });
+  assert.equal(foundry.checkCommand(npm), 'npm run check', 'the wired check');
+});
+
+test('commit-hook: denies with JSON for Copilot and Claude Code, silent otherwise, always exit 0', () => {
+  const repo = gateRepo();
+  const r = run(repo, ['commit-hook'], JSON.stringify(copilotCommit(repo)));
+  assert.equal(r.code, 0);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse');
+  assert.match(out.permissionDecisionReason, /^foundry gate: /);
+  run(repo, ['gate']);
+  assert.deepEqual(run(repo, ['commit-hook'], JSON.stringify(copilotCommit(repo))).stdout, '');
+  assert.deepEqual([run(repo, ['commit-hook'], 'not json').stdout, run(repo, ['commit-hook'], 'not json').code], ['', 0]);
+});
+
+test('init-files: from product on, says when no workflow runs the check', () => {
+  const bare = makeRepo({ 'Makefile': 'test:\n\ttrue\n' });
+  assert.ok(init(bare, '--stage', 'product').stdout.split('\n').includes('ci: no workflow runs make check; propose a job that runs it on every PR'));
+  const wired = makeRepo({ 'Makefile': 'test:\n\ttrue\n', '.github/workflows/ci.yml': 'jobs:\n  c:\n    steps:\n      - run: make check\n' });
+  assert.ok(!init(wired, '--stage', 'product').stdout.includes('ci:'));
+  assert.ok(!init(makeRepo({ 'Makefile': 'test:\n\ttrue\n' }), '--stage', 'explore').stdout.includes('ci:'), 'not at explore');
 });

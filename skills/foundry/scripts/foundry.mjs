@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,9 +44,27 @@ export const REQUIRED = { explore: EXPLORE_FILES, product: PRODUCT_FILES, live: 
 export const UI_ONLY = ['DESIGN.md', 'docs/ui/screens.md'];
 export const requiredFor = (stage, hasUi) => REQUIRED[stage].filter((f) => hasUi || !UI_ONLY.includes(f));
 
-// A repo may keep DESIGN.md below the top (web/DESIGN.md); the state records where as design_md.
-const designPath = (state) => (typeof state?.design_md === 'string' && state.design_md ? state.design_md : 'DESIGN.md');
-const asRecorded = (state) => (f) => (f === 'DESIGN.md' ? designPath(state) : f);
+// A repo may keep a required doc somewhere else (web/DESIGN.md, docs/product/PRODUCT.md); the state records
+// where under one flat key per doc, so the vendored doc-check can read it with sed.
+export const PATH_KEYS = {
+  'PRODUCT.md': 'product_md', 'docs/decisions/index.md': 'decisions_index', 'GLOSSARY.md': 'glossary_md',
+  'ARCHITECTURE.md': 'architecture_md', 'docs/code-map.md': 'code_map', 'DESIGN.md': 'design_md',
+  'docs/ui/screens.md': 'screens_md', 'CONSTRAINTS.md': 'constraints_md', 'docs/threat-model.md': 'threat_model',
+  'docs/runbooks/': 'runbooks_dir',
+};
+const asRecorded = (state) => (f) => {
+  const v = Object.hasOwn(PATH_KEYS, f) ? state?.[PATH_KEYS[f]] : undefined;
+  return typeof v === 'string' && v ? v : f;
+};
+
+// A recorded path is inside the repo, without . or .. parts; a folder ends in /, a file in .md.
+function checkDocPath(key, file, v) {
+  const parts = v.replace(/\/$/, '').split('/');
+  const shape = file.endsWith('/') ? /^[^\s"]+\/$/ : /^[^\s"]+\.md$/;
+  if (v.startsWith('/') || !shape.test(v) || parts.some((p) => p === '' || p === '.' || p === '..') || v.includes(',')) {
+    throw new FoundryError(`${key} must be a repo path ${file.endsWith('/') ? 'ending in /' : 'ending in .md'}`, 2);
+  }
+}
 
 // The code map moved out of the hidden folder, where ripgrep does not look. The old place still counts
 // until grow moves it.
@@ -69,9 +87,18 @@ const UI_FILE = /\.(tsx|jsx|vue|svelte|html)$/;
 const UI_DIRS = ['web/', 'apps/web/', 'frontend/'];
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?|e2e|fixtures?)\/|\.(test|spec)\.[^/]+$/;
 const AUTH_PATH = /(auth|session|login|tenant|rbac|permission)/i;
-const DEPLOY_WORKFLOW = /deploy|docker\/build-push-action|ghcr\.io/i;
+// Only source files count as auth code: a mockup named state-permission-denied.png is not (seen in a real repo).
+const CODE_FILE = /\.(m?[jt]sx?|cjs|py|rb|go|rs|java|kt|swift|php|cs|ex|exs|sql)$/;
+// A deploy is a job or step that ships somewhere. Building or pushing an image is packaging, not deploying.
+const DEPLOY_WORKFLOW = /deploy/i;
+const PUBLISH_WORKFLOW = /docker\/build-push-action|ghcr\.io/i;
 const COMPOSE_FILE = /^(docker-)?compose\.y[a-z]*ml$/;
-const NAMES_USERS = /\busers?\b/i;
+// A README link is a deploy only on a hosting domain, or on a line that says it is the live app.
+const HOSTING = /(^|\.)(vercel\.app|netlify\.app|pages\.dev|workers\.dev|fly\.dev|onrender\.com|herokuapp\.com|railway\.app|github\.io|web\.app|firebaseapp\.com|azurewebsites\.net|amplifyapp\.com|deno\.dev|surge\.sh)$/;
+const LIVE_LINE = /\b(live|demo|production|staging|deployed|hosted)\b/i;
+const NOT_A_SITE = /(^|\.)(example\.(com|org|net)|localhost)$|^(127\.|0\.0\.0\.0)/;
+// Naming users means people rely on it, not the word "user" in a sentence.
+const NAMES_USERS = /\b(our|real|paying|active|existing) (users|customers|clients)\b|\bused (daily |every day )?by\b|\bcustomers\b/i;
 
 function gitOut(top, args) {
   try {
@@ -186,15 +213,28 @@ function deployEvidence(src) {
   for (const f of files) {
     if (/^\.github\/workflows\/[^/]+$/.test(f) && DEPLOY_WORKFLOW.test(read(f))) found.push(f);
   }
+  for (const line of read('README.md').split('\n')) {
+    for (const url of line.match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
+      let host = '';
+      try { host = new URL(url).hostname; } catch { continue; }
+      if (NOT_A_SITE.test(host) || host === 'github.com' || host.endsWith('.github.com')) continue;
+      if (HOSTING.test(host) || LIVE_LINE.test(line)) { found.push(`README.md: ${url}`); return found; }
+    }
+  }
+  return found;
+}
+
+// Ready to run somewhere, which is not the same as running for someone: reported, never a reason for live.
+function packagedEvidence(src) {
+  const { files, read } = src;
+  const found = [];
+  for (const f of files) {
+    if (/^\.github\/workflows\/[^/]+$/.test(f) && !DEPLOY_WORKFLOW.test(read(f)) && PUBLISH_WORKFLOW.test(read(f))) found.push(f);
+  }
   for (const f of files) {
     if (COMPOSE_FILE.test(f) && /^\s*ports:/m.test(read(f))) found.push(f);
   }
   if (files.includes('Dockerfile')) found.push('Dockerfile');
-  for (const url of read('README.md').match(/https:\/\/[^\s)<>\]"'`]+/g) ?? []) {
-    let host = '';
-    try { host = new URL(url).hostname; } catch { continue; }
-    if (host !== 'github.com' && !host.endsWith('.github.com')) { found.push(`README.md: ${url}`); break; }
-  }
   return found;
 }
 
@@ -222,7 +262,8 @@ export function signals(top, opts = {}) {
   const has_ui = files.some((f) => UI_FILE.test(f) && !TEST_PATH.test(f))
     || UI_DIRS.some((d) => files.some((f) => f.startsWith(d)) || src.has(d));
   const deployed = deployEvidence(src);
-  const auth_code = files.filter((f) => AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
+  const packaged = packagedEvidence(src);
+  const auth_code = files.filter((f) => CODE_FILE.test(f) && !f.startsWith('docs/') && AUTH_PATH.test(f)).slice(0, AUTH_LIMIT);
   const sessions = asOf ? null : matchingSessions(top, sessionsRoot)?.length ?? null;
   const hasProduct = src.has('PRODUCT.md');
   const namesUsers = NAMES_USERS.test(src.read('README.md'));
@@ -236,7 +277,7 @@ export function signals(top, opts = {}) {
   const liveReasons = deployed.length
     ? [...deployed.map((d) => `deployed: ${d}`), ...auth_code.map((a) => `auth code: ${a}`), ...(namesUsers ? ['README names users'] : [])]
     : [];
-  const reasons = [...productReasons, ...liveReasons];
+  const reasons = [...productReasons, ...liveReasons, ...packaged.map((p) => `packaged, not a deploy: ${p}`)];
 
   let proposed = 'explore';
   if (deployed.length && (auth_code.length || namesUsers)) proposed = 'live';
@@ -261,7 +302,7 @@ export function signals(top, opts = {}) {
     ? files.find((f) => /^[^/]+\/DESIGN\.md$/.test(f)) ?? null
     : null;
 
-  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
+  const out = { commits, first_commit, age_days, files: fileMap, has_ui, deployed, packaged, auth_code, sessions, proposed, reasons, behind, design_md_found, code_map_legacy };
   if (asOf) out.as_of = asOf.sha;
   return out;
 }
@@ -316,7 +357,33 @@ const SETTERS = {
     if (!/^(?:[^/\s]+\/)*DESIGN\.md$/.test(v) || v.split('/').some((p) => p === '.' || p === '..')) throw new FoundryError('design_md must be a repo path ending in DESIGN.md', 2);
     s.design_md = v;
   },
+  ...Object.fromEntries(Object.entries(PATH_KEYS).filter(([, k]) => k !== 'design_md').map(([file, key]) => [key, (s, v) => {
+    checkDocPath(key, file, v);
+    s[key] = v;
+  }])),
+  check_command: (s, v) => {
+    if (!v.trim()) throw new FoundryError('check_command must not be empty', 2);
+    s.check_command = v.trim();
+  },
+  gate: (s, v) => {
+    if (v !== 'on' && v !== 'off') throw new FoundryError('gate must be on or off', 2);
+    s.gate = v;
+  },
+  'queue.done': (s, v) => markInterview(s, v, true),
+  'queue.open': (s, v) => markInterview(s, v, false),
 };
+
+// Marks one queued interview by its name, compared without case or surrounding spaces.
+function markInterview(s, name, done) {
+  const queue = Array.isArray(s.queue) ? s.queue : [];
+  const key = name.trim().toLowerCase();
+  const hit = queue.filter((q) => q && typeof q.interview === 'string' && q.interview.trim().toLowerCase() === key);
+  if (hit.length !== 1) {
+    const names = queue.map((q) => q?.interview).filter(Boolean).join('; ');
+    throw new FoundryError(`no single queued interview named "${name}"; the queue holds: ${names || 'nothing'}`, 2);
+  }
+  hit[0].done = done;
+}
 
 function parseSets(args) {
   const sets = [];
@@ -350,6 +417,8 @@ function state(args) {
 
 // ---- init-files ----
 
+const DECISIONS_INDEX = 'docs/decisions/index.md';
+const DECISION_TEMPLATE = 'docs/decisions/0000-template.md';
 const TEMPLATES = join(dirname(fileURLToPath(import.meta.url)), '..', 'templates');
 const DOC_CHECK = '.agents/doc-check.sh';
 const CHECK_SH = '.agents/check.sh';
@@ -484,28 +553,47 @@ function ignoredWarnings(top, paths) {
   return out;
 }
 
+// Whether a GitHub workflow runs the check command, or the script it calls.
+function ciRuns(top, command) {
+  const dir = join(top, '.github', 'workflows');
+  if (!existsSync(dir)) return false;
+  const words = [command, command.replace(/^sh\s+/, '')];
+  return readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).some((f) => words.some((w) => readText(join(dir, f)).includes(w)));
+}
+
 // Writes the stage's missing docs, the state, the doc check and the check task. Returns the report lines.
-export function initFiles(top, { stage, name = basename(top), skip = [], dryRun = false } = {}) {
+export function initFiles(top, { stage, name = basename(top), skip = [], at = {}, dryRun = false } = {}) {
   if (!STAGES.includes(stage)) throw new FoundryError(`--stage must be one of ${STAGES.join(', ')}`, 2);
   const lines = [];
   const writes = [];
   const reported = [];
-  const exists = (f) => existsSync(join(top, f));
-  const current = readState(top);
-  const hasUi = current ? current.has_ui === true : signals(top).has_ui;
+  const recordedPaths = {};
+  for (const [file, path] of Object.entries(at)) {
+    if (!Object.hasOwn(PATH_KEYS, file)) throw new FoundryError(`--at accepts ${Object.keys(PATH_KEYS).join(', ')}`, 2);
+    SETTERS[PATH_KEYS[file]](recordedPaths, path);
+  }
+  const stateOnDisk = readState(top);
+  const current = stateOnDisk && { ...stateOnDisk, ...recordedPaths };
+  const recorded = asRecorded(current ?? recordedPaths);
+  // The decision template goes next to a recorded decisions index.
+  const where = (f) => (f === DECISION_TEMPLATE && recorded(DECISIONS_INDEX) !== DECISIONS_INDEX
+    ? join(dirname(recorded(DECISIONS_INDEX)), basename(f)) : recorded(f));
+  // A doc recorded elsewhere is looked for there, and never written at its default place.
+  const exists = (f) => existsSync(join(top, where(f)));
+  const hasUi = stateOnDisk ? stateOnDisk.has_ui === true : signals(top).has_ui;
   const uiDocs = hasUi && stage !== 'explore' ? UI_TEMPLATES : [];
-  const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f));
+  const docs = [...STAGE_TEMPLATES[stage], ...uiDocs].filter(([f]) => !skip.includes(f) && !skip.includes(where(f)));
   const written = new Set(docs.filter(([f]) => !exists(f)).map(([f]) => f));
   const willExist = (f) => !skip.includes(f) && (written.has(f) || exists(f));
   const legacyMap = legacyCodeMap(exists);
   // AGENTS.md links the code map where it is today; grow moves it and the link together.
-  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : asRecorded(current)(f));
+  const rename = (f) => (f === CODE_MAP && legacyMap ? LEGACY_CODE_MAP : where(f));
   const check = planCheck(top);
 
   const agentsExisted = exists('AGENTS.md');
   if (legacyMap) lines.push(`warn ${MOVE_CODE_MAP}`);
   if (current && current.stage !== stage) lines.push(`warn --stage ${stage} differs from the recorded stage ${current.stage}; the state keeps ${current.stage}, so set it with state --set stage=${stage} first`);
-  reported.push('AGENTS.md', ...docs.map(([f]) => f), STATE_FILE, check.file, DOC_CHECK);
+  reported.push('AGENTS.md', ...docs.map(([f]) => where(f)), STATE_FILE, check.file, DOC_CHECK);
   // Never rewrite an existing AGENTS.md. When foundry wrote it, name what this stage adds so grow can propose it.
   if (agentsExisted && current?.agents_md?.state === 'migrated') {
     lines.push('kept AGENTS.md (exists)', ...agentsMdGaps(readText(join(top, 'AGENTS.md')), stage, willExist, hasUi, rename));
@@ -515,8 +603,8 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
     lines.push('created AGENTS.md');
   }
   for (const [f, t] of docs) {
-    if (written.has(f)) { writes.push([f, template(t)]); lines.push(`created ${f}`); }
-    else lines.push(`kept ${f} (exists)`);
+    if (written.has(f)) { writes.push([where(f), template(t)]); lines.push(`created ${where(f)}`); }
+    else lines.push(where(f) === f ? `kept ${f} (exists)` : `kept ${where(f)} (recorded for ${f})`);
   }
 
   const docCheckVersion = versionOf(template('doc-check.sh'));
@@ -526,6 +614,7 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
       version: 1, stage, stage_set: today(), stage_reason: 'init', has_ui: hasUi,
       agents_md: { budget_lines: 100, state: agentsExisted ? 'unmigrated' : 'migrated' },
       readiness_tier: 0, providers: {}, queue: [], garden_last: null, doc_check_version: docCheckVersion,
+      ...recordedPaths,
     };
   lines.push(current ? `kept ${STATE_FILE} (exists)` : `created ${STATE_FILE}`);
 
@@ -536,6 +625,7 @@ export function initFiles(top, { stage, name = basename(top), skip = [], dryRun 
   else { writes.push([check.file, check.text]); lines.push(`wired check in ${check.file}`); }
 
   lines.push(`doc-check ${vendorDocCheck(top, { dryRun: true })}`);
+  if (stage !== 'explore' && !ciRuns(top, check.command)) lines.push(`ci: no workflow runs ${check.command}; propose a job that runs it on every PR`);
 
   if (!dryRun) {
     for (const [f, text, mode] of writes) {
@@ -562,7 +652,12 @@ function initFilesCmd(args) {
     if (a === '--stage') opts.stage = value();
     else if (a === '--name') opts.name = value();
     else if (a === '--skip') opts.skip.push(...value().split(',').map((s) => s.trim().replace(/^\.\//, '')).filter(Boolean));
-    else if (a === '--dry-run') opts.dryRun = true;
+    else if (a === '--at') {
+      const pair = value();
+      const eq = pair.indexOf('=');
+      if (eq < 1) throw new FoundryError('--at needs <doc>=<path>', 2);
+      opts.at = { ...opts.at, [pair.slice(0, eq).replace(/^\.\//, '')]: pair.slice(eq + 1) };
+    } else if (a === '--dry-run') opts.dryRun = true;
     else throw new FoundryError(`unknown argument ${a}`, 2);
   }
   if (!opts.stage) throw new FoundryError('init-files needs --stage', 2);
@@ -693,7 +788,7 @@ function digestCmd(args) {
 const GARDEN_DEFAULT = 50;
 const EMPTY_TREE = (top) => gitOut(top, ['hash-object', '-t', 'tree', '/dev/null']);
 
-// The commits since the last garden pass, or the last 50 (from the root when there are fewer), as git's from..to.
+// The commits since the last garden pass, or since HEAD~50 on the first-parent line (from the root when there are fewer), as git's from..to.
 export function gardenRange(top) {
   const to = gitOut(top, ['rev-parse', '--verify', '-q', 'HEAD^{commit}']);
   if (!to) throw new FoundryError('no commits yet', 1);
@@ -759,18 +854,183 @@ export function nearestTop(cwd = process.cwd()) {
   }
 }
 
+// Claude Code adds a SessionStart hook's plain stdout to the context. Copilot drops any stdout that isn't JSON:
+// it reads {"additionalContext"}, so a plain line never reached a Copilot chat. Claude Code sends hook_event_name
+// on stdin; without stdin, CLAUDE_PLUGIN_ROOT without COPILOT_CLI means Claude Code (the superpowers convention).
+export function hookOutput(line, input = {}, env = {}) {
+  const claude = typeof input.hook_event_name === 'string'
+    || (Object.keys(input).length === 0 && Boolean(env.CLAUDE_PLUGIN_ROOT) && !env.COPILOT_CLI);
+  return claude ? line : JSON.stringify({ additionalContext: line.trimEnd() }) + '\n';
+}
+
+function hookInput() {
+  if (process.stdin.isTTY) return {};
+  try {
+    const v = JSON.parse(readFileSync(0, 'utf8') || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 // SessionStart hook: prints its line or nothing. Always exits 0 and stays silent on any error.
 function hook() {
   try {
-    const line = hookLine(nearestTop());
-    if (line) process.stdout.write(line);
+    const input = hookInput();
+    const cwd = typeof input.cwd === 'string' && existsSync(input.cwd) ? input.cwd : process.cwd();
+    const line = hookLine(nearestTop(cwd));
+    if (line) process.stdout.write(hookOutput(line, input, process.env));
   } catch {
     // A session must start whatever state the repo is in.
   }
   process.exitCode = 0;
 }
 
-const DISPATCH = { state, signals: signalsCmd, 'init-files': initFilesCmd, 'vendor-check': vendorCheckCmd, digest: digestCmd, 'garden-range': gardenRangeCmd, hook };
+// ---- gate ----
+
+// The tree of the whole working copy as git would commit it after `git add -A` (ignored files left out),
+// built in a throwaway index so the real one is untouched. Starting from a copy of the real index keeps it a
+// stat check for unchanged files.
+export function worktreeTree(top) {
+  const gitDir = gitOut(top, ['rev-parse', '--absolute-git-dir']);
+  if (!gitDir) return null;
+  const tmp = mkdtempSync(join(tmpdir(), 'foundry-gate-'));
+  const index = join(tmp, 'index');
+  try {
+    if (existsSync(join(gitDir, 'index'))) copyFileSync(join(gitDir, 'index'), index);
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    const opts = { cwd: top, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };
+    execFileSync('git', ['add', '-A', '--', '.'], opts);
+    return execFileSync('git', ['write-tree'], opts).trim();
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const stampPath = (top) => {
+  const p = gitOut(top, ['rev-parse', '--git-path', 'foundry-gate']);
+  return p && (p.startsWith('/') ? p : join(top, p));
+};
+
+// The repo's one check command: recorded as check_command, else the one init-files wired.
+export function checkCommand(top, state = readState(top)) {
+  if (typeof state?.check_command === 'string' && state.check_command.trim()) return state.check_command.trim();
+  const plan = planCheck(top);
+  if (plan.text === null) return plan.command;
+  if (plan.script !== undefined && existsSync(join(top, plan.file))) return plan.command;
+  return null;
+}
+
+// Gated: a foundry repo past explore, with a check command, and gate not set to off.
+function gated(top) {
+  const state = readState(top);
+  if (!state || state.stage === 'explore' || state.gate === 'off') return null;
+  const command = checkCommand(top, state);
+  return command ? { state, command } : null;
+}
+
+// `gate`: runs the check command; when it passes, records the tree it passed on.
+function gateCmd(args) {
+  for (const a of args) throw new FoundryError(`unknown argument ${a}`, 2);
+  const top = repoTop();
+  const state = readState(top);
+  if (!state) throw new FoundryError(`no ${STATE_FILE}`, 1);
+  const command = checkCommand(top, state);
+  if (!command) throw new FoundryError('no check command: wire one with init-files, or state --set check_command=<command>', 1);
+  const before = worktreeTree(top);
+  const r = spawnSync('sh', ['-c', command], { cwd: top, stdio: 'inherit' });
+  const code = r.status ?? 1;
+  if (code !== 0) {
+    process.stdout.write(`gate: ${command} failed (exit ${code}); nothing recorded\n`);
+    process.exitCode = code;
+    return;
+  }
+  const after = worktreeTree(top);
+  // A check that rewrites files (a formatter) passed on something else than what is now on disk.
+  if (!before || before !== after) {
+    process.stdout.write(`gate: ${command} passed but changed files; review them and run gate again\n`);
+    process.exitCode = 1;
+    return;
+  }
+  writeFileSync(stampPath(top), `${after}\n`);
+  process.stdout.write(`gate: ${command} passed on ${after.slice(0, 7)}; commits of this state are allowed\n`);
+}
+
+const SHELLS = new Set(['bash', 'Bash', 'run_in_terminal', 'powershell', 'shell']);
+// `git commit` in command position: at the start, or after ; & | ( or a newline, past any VAR=x assignments and
+// env/command/sudo/exec/nohup/time wrappers. Not commit-tree, not `echo git commit`. Best effort: aliases and
+// `bash -c "..."` get through, which is why CI runs the check too.
+const GIT_COMMIT = /(^|[;&|(\n])\s*(?:(?:\w+=\S*|env|command|sudo|exec|nohup|time)\s+)*git(\s+-C\s+("[^"]+"|'[^']+'|\S+)|\s+-c\s+\S+|\s+--no-pager)*\s+commit(?![\w-])/;
+
+// The shell commands of a PreToolUse payload: Claude Code's tool_input, Copilot's toolArgs (an object or JSON text).
+export function shellCommands(payload) {
+  const calls = Array.isArray(payload?.toolCalls)
+    ? payload.toolCalls.map((c) => [c?.name, c?.args])
+    : [[payload?.tool_name ?? payload?.toolName, payload?.tool_input ?? payload?.toolInput ?? payload?.toolArgs]];
+  const out = [];
+  for (const [name, raw] of calls) {
+    if (!SHELLS.has(name)) continue;
+    let args = raw;
+    if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = { command: args }; } }
+    if (typeof args?.command === 'string') out.push(args.command);
+  }
+  return out;
+}
+
+// Quoted text is data, not a command: `echo "a; git commit"` commits nothing.
+const unquoted = (command) => command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""');
+
+// The folder a commit command runs in: its `git -C <dir>`, else a leading `cd <dir>`, else the payload cwd.
+export function commitDir(command, cwd) {
+  const unq = (s) => s.replace(/^["']|["']$/g, '');
+  const c = command.match(/\bgit\s+-C\s+("[^"]+"|'[^']+'|\S+)[^;&|]*\bcommit(?![\w-])/);
+  const d = c ? unq(c[1]) : command.match(/^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/)?.[1];
+  if (!d) return cwd;
+  const dir = unq(d).replace(/^~(?=\/|$)/, homedir());
+  return dir.startsWith('/') ? dir : join(cwd, dir);
+}
+
+// The reason to refuse this commit, or null to let it through.
+export function gateReason(payload, self = fileURLToPath(import.meta.url)) {
+  const cwd = typeof payload?.cwd === 'string' && existsSync(payload.cwd) ? payload.cwd : process.cwd();
+  for (const command of shellCommands(payload)) {
+    if (!GIT_COMMIT.test(unquoted(command))) continue;
+    const dir = commitDir(command, cwd);
+    if (!existsSync(dir)) continue;
+    const top = repoTop(dir);
+    const g = gated(top);
+    if (!g) continue;
+    const tree = worktreeTree(top);
+    if (!tree) continue;
+    const path = stampPath(top);
+    const stamp = path && existsSync(path) ? readFileSync(path, 'utf8').trim() : '';
+    if (stamp === tree) continue;
+    return `foundry gate: the files in ${top} changed since \`${g.command}\` last passed there${stamp ? '' : ' (no pass recorded)'}. `
+      + `Run \`node "${self}" gate\` from the repo (it runs the check and records the pass), fix what fails, then commit again. `
+      + 'A check that is red for a reason outside this change is the owner\'s call: ask before committing anyway.';
+  }
+  return null;
+}
+
+// PreToolUse hook on shell tools: refuses a git commit whose files never passed the check. Always exits 0.
+function commitHook() {
+  try {
+    const reason = gateReason(hookInput());
+    if (reason) {
+      process.stdout.write(JSON.stringify({
+        permissionDecision: 'deny', permissionDecisionReason: reason,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+      }) + '\n');
+    }
+  } catch {
+    // Never stop work because the gate itself broke.
+  }
+  process.exitCode = 0;
+}
+
+const DISPATCH = { state, signals: signalsCmd, 'init-files': initFilesCmd, 'vendor-check': vendorCheckCmd, digest: digestCmd, 'garden-range': gardenRangeCmd, hook, gate: gateCmd, 'commit-hook': commitHook };
 // The CLI command names; the references may only mention these.
 export const COMMANDS = Object.keys(DISPATCH);
 
@@ -778,7 +1038,7 @@ function main([cmd, ...rest]) {
   try {
     if (Object.hasOwn(DISPATCH, cmd)) DISPATCH[cmd](rest);
     else {
-      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook\n');
+      process.stderr.write('usage: node foundry.mjs state [--set key=value ...] | signals [--json] | init-files --stage <stage> [--name <name>] [--skip <path>,...] [--at <doc>=<path> ...] [--dry-run] | vendor-check | digest [--limit N] [--json] | garden-range [--mark] [--json] | hook | gate | commit-hook\n');
       process.exitCode = 2;
     }
   } catch (err) {

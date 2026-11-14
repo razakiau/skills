@@ -21,6 +21,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "bash|Bash|run_in_terminal|powershell|shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/foundry/scripts/foundry.mjs\" commit-hook",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PostToolUse": [

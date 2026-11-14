@@ -14,7 +14,7 @@ A theme opens at its stage and stays open at every later stage.
 | specs | product | A change bigger than a day gets a short spec next to its ticket, kept with the code, so the reviewer and the next agent read what was meant, not only what was done. |
 | design-system | product | A written design system keeps screens consistent. Write it before the first screen. |
 | screens | product | Only with UI. A map of the screens with their approved mockups, kept true by a check after each UI change, so the agent looks at a screen before the owner does. |
-| quality-bar | product | The thresholds a change must meet, written once, so each review doesn't invent them. |
+| quality-bar | product | The thresholds a change must meet, written once, so each review doesn't invent them. The rungs are in [ladder.md](ladder.md). |
 | verification | product | An agent must show that a change works: the command that starts the app and the tool that checks it. |
 | security-review | product | The reviewer of each change reads it for access control, input handling and secrets. |
 | threat-model | live | Once others use it, name what an attacker wants and where they would get in. |
