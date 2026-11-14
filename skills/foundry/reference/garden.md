@@ -41,8 +41,8 @@ Done: issues are offered, or you said there is no tracker.
 
 ### 6. Mark the pass
 
-After the owner has read the report, run `node <skill dir>/scripts/foundry.mjs garden-range --mark`. It sets `garden_last` to HEAD, so the next pass starts here.
-Done: the script printed `garden_last: <sha>`.
+After the owner has read the report, run `node <skill dir>/scripts/foundry.mjs garden-range --mark`. It sets `garden_last` to the newest commit of HEAD that is also on the remote default branch (`origin/HEAD`, else `origin/main`, else `origin/master`): their merge-base. On the default branch, once pushed, that is HEAD. On a feature branch it is where the branch left the default branch, so a later squash merge, which drops the branch's commits, still leaves `garden_last` in the default branch's history; the next pass covers the branch's work again, as the squashed commit. A repo with no remote default branch, or a HEAD that shares no history with it, gets HEAD.
+Done: the script printed `garden_last: <sha>`. When it is not HEAD, or HEAD shares no history with the remote, the line says why in parentheses; with `--json` that line goes to stderr.
 
 ### 7. Scheduling
 
