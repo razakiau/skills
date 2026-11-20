@@ -489,13 +489,19 @@ function measured(what, fn, fallback) {
   }
 }
 
-// The audit object, its text form, and the snapshot tree it measured (code files only:
-// every measure below reads code paths). `tree` reuses a snapshot the caller just took.
-// `cap` (the hook): a code diff past MAX_JUDGED_FILES or MAX_JUDGED_LINES is not measured
-// further; the report then carries `tooLarge` and only base, files, code and tests.
-function buildReport(paths, tree = codeSnapshot(paths), { cap = false } = {}) {
+// The audit of the change since the base: the report object, why unlisted home is not
+// measured (null when it is), and the snapshot tree it measured. `tree` reuses a snapshot
+// the caller just took.
+function buildReport(paths, tree = codeSnapshot(paths), opts = {}) {
   const base = findBase(paths);
-  const files = readDiff(paths.top, base.ref, tree);
+  return reportOf(paths, base, tree, readDiff(paths.top, base.ref, tree), opts);
+}
+
+// The audit of `files`, the code diff from `base.ref` to `tree` (code files only: every
+// measure below reads code paths). `cap` (the hook): a code diff past MAX_JUDGED_FILES or
+// MAX_JUDGED_LINES is not measured further; the report then carries `tooLarge` and only
+// base, files, code and tests.
+function reportOf(paths, base, tree, files, { cap = false } = {}) {
   const code = files.filter((f) => !f.test);
   if (cap && (code.length > MAX_JUDGED_FILES || sum(code).added > MAX_JUDGED_LINES)) {
     const report = { base, files, code: sum(code), tests: sum(files.filter((f) => f.test)), tooLarge: true };
@@ -653,17 +659,6 @@ function audit(args) {
   }
   process.stdout.write(args.includes('--json') ? JSON.stringify(report) + '\n'
     : `${formatText(report, unmeasured)}${dupLine(report.duplicates, why)}\n`);
-}
-
-// Identifies the changed code and test content: the measured paths with their status and
-// their blob in the snapshot tree (none when deleted). Other files never move it.
-function fingerprint(top, report, tree) {
-  const paths = report.files.map((f) => f.path);
-  const blobs = git(['--literal-pathspecs', 'ls-tree', '-r', '-z', tree, '--', ...paths], { cwd: top });
-  // A new `start` is a new change point; a merge base or root moving under the same content is not.
-  const h = createHash('sha1').update(report.base.kind === 'start' ? `${report.base.ref}\0` : '\0');
-  for (const f of report.files) h.update(`${f.status}\0${f.path}\0`);
-  return h.update(blobs).digest('hex');
 }
 
 const SELF = fileURLToPath(import.meta.url);
@@ -870,9 +865,9 @@ function asked() {
   });
 }
 
-// `{ changed, tree, files }`: the code files (vendored and generated left out) that differ between
-// the turn-start tree and `tree` (the code snapshot now), and whether a non-test one is among them;
-// null when the session has no usable record.
+// `{ changed, from, tree, files }`: the code files (vendored and generated left out) that differ
+// between the turn-start tree `from` and `tree` (the code snapshot now), and whether a non-test one
+// is among them; null when the session has no usable record.
 function turnChangedCode(paths, payload) {
   const file = turnFile(paths, payload);
   if (!file) return null;
@@ -881,59 +876,107 @@ function turnChangedCode(paths, payload) {
   if (!/^[0-9a-f]{40,64}$/.test(from) || tryGit(['cat-file', '-e', `${from}^{tree}`], { cwd: paths.top }) === null) return null;
   const tree = codeSnapshot(paths);
   const files = readDiff(paths.top, from, tree);
-  return { changed: files.some((f) => !f.test), tree, files };
+  return { changed: files.some((f) => !f.test), from, tree, files };
 }
 
-const MAX_HOOK_FILES = 40;
-// With a "this turn:" section first, the whole change lists only this many other files.
-const MAX_HOOK_OTHER_FILES = 15;
-
-// A too-large diff is not listed by blob: its file list alone identifies it.
-function hookFingerprint(top, report, tree) {
-  if (!report.tooLarge) return fingerprint(top, report, tree);
-  const h = createHash('sha1').update(`large\0${report.base.kind === 'start' ? report.base.ref : ''}\0`);
-  for (const f of report.files) h.update(`${f.status}\0${f.path}\0${f.added}\0${f.removed}\0`);
-  return h.digest('hex');
+// One since record per session and repo (`since` without a session id): per session, so one
+// chat's audit never hides another's.
+function sinceFile({ state }, payload) {
+  const hash = sessionHash(payload);
+  return join(state, hash ? `since-${hash}` : 'since');
 }
 
-function hookText({ paths, built, turned }) {
+// `{ tree, paths, spoke, absorbed }`: the tree the session's unreported change is measured from,
+// the paths its turns changed since then (null: no turn record, every path counts), whether the
+// hook has spoken to it, and `absorbed`, carried over as stored. null when the file is missing,
+// unreadable, or its tree no longer exists.
+function readSince(paths, payload) {
+  const rec = readJson(sinceFile(paths, payload));
+  if (typeof rec?.tree !== 'string' || !/^[0-9a-f]{40,64}$/.test(rec.tree)) return null;
+  if (rec.paths !== null && !Array.isArray(rec.paths)) return null;
+  if (tryGit(['cat-file', '-e', `${rec.tree}^{tree}`], { cwd: paths.top }) === null) return null;
+  const absorbed = rec.absorbed && typeof rec.absorbed === 'object' ? rec.absorbed : {};
+  return { tree: rec.tree, paths: rec.paths, spoke: rec.spoke === true, absorbed };
+}
+
+function writeSince(paths, payload, record) {
+  writeFileSync(sinceFile(paths, payload), `${JSON.stringify(record)}\n`);
+}
+
+// The code this session changed in one repo since the hook last spoke to it (since its first
+// turn, if never): `{ since, tree, files, base, whole, label, tracked, absorbed }`, or null when
+// there is nothing to judge. A session with a turn record (`tracked`) counts only the paths its
+// turns changed, so the owner's edits between turns stay out. Without one (no session id, or the
+// harness never sent the turn start) only the payload's own repo is judged, from the base, then
+// from where the hook last spoke. A path counts only while it is in the whole change since the
+// base (`whole`), so files a merge of the default branch brought in are not the session's.
+// `strict` (the ask_user gate) judges nothing without a turn record; `foldOnly` (Stop while the
+// agent answers an audit) only adds the turn's paths to the record.
+function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
+  const turned = turnChangedCode(paths, payload);
+  if (!turned && (strict || !paths.own || foldOnly)) return null;
+  if (turned && !turned.files.length) return null;
+  const tracked = Boolean(turned);
+  const tree = tracked ? turned.tree : codeSnapshot(paths);
+  const rec = readSince(paths, payload);
+  const base = findBase(paths);
+  const since = rec?.tree ?? (tracked ? turned.from : base.ref);
+  const want = tracked && rec?.paths !== null
+    ? [...new Set([...(rec?.paths ?? []), ...turned.files.map((f) => f.path)])].sort() : null;
+  const absorbed = rec?.absorbed ?? {};
+  const next = { tree: since, paths: want, spoke: rec?.spoke ?? false, absorbed };
+  // An untracked session gets a record only once the hook speaks to it.
+  if ((tracked || rec) && JSON.stringify(next) !== JSON.stringify(rec)) writeSince(paths, payload, next);
+  if (foldOnly || (tracked && !turned.changed)) return null;
+  const whole = readDiff(paths.top, base.ref, tree);
+  const inWhole = new Set(whole.map((f) => f.path));
+  const wanted = want && new Set(want);
+  const files = readDiff(paths.top, since, tree).filter((f) => (!wanted || wanted.has(f.path)) && inWhole.has(f.path));
+  if (!files.some((f) => !f.test)) return null;
+  const label = rec?.spoke ? 'since the last audit' : tracked ? "this session's change" : 'change since the base';
+  return { since, tree, files, base, whole, label, tracked, absorbed };
+}
+
+const fileLine = (f) => `${f.status} ${f.path} +${f.added} -${f.removed}`;
+
+// The text of an unreported change: its label, size and totals, its files, then the flags.
+function deltaText(r, unmeasured, { label }) {
+  return [
+    `${label}: ${r.size}  code +${r.code.added} -${r.code.removed}  tests +${r.tests.added} -${r.tests.removed}`,
+    ...r.files.map(fileLine),
+    ...flagLines(r, unmeasured),
+  ].join('\n') + '\n';
+}
+
+// The whole change since the base as totals only: its audit is the skill's step 8.
+function wholeText(base, files) {
+  const part = (fs) => { const t = sum(fs); return `${fs.length} files +${t.added} -${t.removed}`; };
+  return `whole change since ${base.kind} ${base.ref.slice(0, 12)}: `
+    + `code ${part(files.filter((f) => !f.test))}  tests ${part(files.filter((f) => f.test))}\n`
+    + 'whole-change audit: step 8, before the pull request\n';
+}
+
+// One repo's part of the audit: the unreported change, then the whole change as totals.
+function hookText({ paths, built, u }) {
   const r = built.report;
   const head = paths.own ? '' : `repo: ${paths.top}\n`;
-  if (r.tooLarge) {
-    return `${head}diff too large to judge (${r.files.filter((f) => !f.test).length} files, +${r.code.added}); `
-      + 'check the base or .gitignore\n';
-  }
-  if (!turned) return head + formatText(r, built.unmeasured, { maxFiles: MAX_HOOK_FILES });
-  const t = turned.files;
-  const now = sum(t.filter((f) => !f.test));
-  const tests = sum(t.filter((f) => f.test));
-  return `${head}this turn: code +${now.added} -${now.removed}  tests +${tests.added} -${tests.removed}\n`
-    + t.slice(0, MAX_HOOK_FILES).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}\n`).join('')
-    + (t.length > MAX_HOOK_FILES ? `… and ${t.length - MAX_HOOK_FILES} more\n` : '')
-    + 'whole change:\n'
-    + formatText(r, built.unmeasured, { maxFiles: MAX_HOOK_OTHER_FILES, skip: new Set(t.map((f) => f.path)) });
+  const delta = r.tooLarge
+    ? `diff too large to judge (${r.files.filter((f) => !f.test).length} files, +${r.code.added}); check the base or .gitignore\n`
+    : deltaText(r, built.unmeasured, { label: u.label });
+  return head + delta + wholeText(u.base, u.whole);
 }
 
-// The audit text for every judged repo whose code the agent changed this turn, or null. A repo
-// blocks once per distinct code diff and session. Without a turn record (no session id, or the
-// harness never sent the turn start) only the payload's own repo is judged, on its whole diff
-// since the base; `strict` (the ask_user gate) judges nothing without a record.
-function auditTurn(payload, { strict = false } = {}) {
+// The audit text for every judged repo whose unreported change is past Small, or null. A Small
+// one stays unreported and adds to the next turn's; a repo that speaks starts a new one from now.
+function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
   const parts = [];
-  const hash = sessionHash(payload);
   for (const paths of hookRepos(payload)) {
-    const turned = turnChangedCode(paths, payload);
-    if (turned ? !turned.changed : strict || !paths.own) continue;
-    const built = buildReport(paths, turned?.tree, { cap: true });
-    if (!built.report.files.some((f) => !f.test)) continue;
-    const print = hookFingerprint(paths.top, built.report, built.tree);
-    // Per session: one chat consuming an audit must not hide it from another.
-    const file = join(paths.state, hash ? `hook-fingerprint-${hash}` : 'hook-fingerprint');
-    let last = null;
-    try { last = readFileSync(file, 'utf8').trim(); } catch { /* never blocked */ }
-    if (print === last) continue;
-    writeFileSync(file, `${print}\n`);
-    parts.push({ paths, built, turned });
+    const u = unreported(paths, payload, { strict, foldOnly });
+    if (!u) continue;
+    const built = reportOf(paths, { ref: u.since, kind: 'since' }, u.tree, u.files, { cap: true });
+    if (built.report.size === 'small') continue;
+    writeSince(paths, payload, { tree: u.tree, paths: u.tracked ? [] : null, spoke: true, absorbed: u.absorbed });
+    parts.push({ paths, built, u });
   }
   if (!parts.length) return null;
   const body = parts.map(hookText).join('\n');
@@ -944,11 +987,13 @@ function auditTurn(payload, { strict = false } = {}) {
       : ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.`);
 }
 
-// Stop hook: blocks the end of a turn with the audit. Always exits 0.
+// Stop hook: blocks the end of a turn with the audit. While the agent answers one
+// (stop_hook_active), its edits only join the next. Always exits 0.
 function hook() {
   silently(() => {
     const payload = readPayload();
-    if (!payload || payload.stop_hook_active || payload.stopHookActive) return null;
+    if (!payload) return null;
+    if (payload.stop_hook_active || payload.stopHookActive) { auditTurn(payload, { foldOnly: true }); return null; }
     const reason = auditTurn(payload);
     return reason && { decision: 'block', reason, hookSpecificOutput: { hookEventName: 'Stop', decision: 'block', reason } };
   });
@@ -969,28 +1014,34 @@ function ask() {
   });
 }
 
-// `skip`: paths already listed above (the hook's "this turn:" section), left out of the file lines.
-function formatText(r, unmeasured, { maxFiles = Infinity, skip = new Set() } = {}) {
+// The five flag lines of a report: shared, new files, exports, tests beside, unlisted home.
+function flagLines(r, unmeasured) {
   // TS/JS files give names or "none"; other languages are named as not measured.
   const code = r.files.filter((f) => !f.test);
-  const listed = r.files.filter((f) => !skip.has(f.path));
   const other = [...new Set(code.map((f) => ext(f.path)).filter((e) => !JS_EXT.has(e)))].sort();
   const js = code.some((f) => JS_EXT.has(ext(f.path)));
   const exportsLine = r.exports === null ? 'not measured (error)'
     : [js || !other.length ? (r.exports.map((e) => e.name).join(', ') || 'none') : '',
       other.length ? `not measured (${other.join(', ')})` : ''].filter(Boolean).join('; ');
   return [
-    `base: ${r.base.kind} ${r.base.ref.slice(0, 12)}${r.base.note ? ` (${r.base.note})` : ''}`,
-    `size: ${r.size}`,
     `shared: ${r.shared === null ? 'not measured (graph)' : r.shared.length ? r.shared.join(', ') : 'none'}`,
-    `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
-    ...listed.slice(0, maxFiles).map((f) => `${f.status} ${f.path} +${f.added} -${f.removed}`),
-    ...(listed.length > maxFiles ? [`… and ${listed.length - maxFiles} more (run audit for the full list)`] : []),
     `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,
     `exports: ${exportsLine}`,
     `tests beside: ${r.testBeside === null ? 'not measured (error)'
       : r.testBeside.length ? r.testBeside.map((t) => `${t.added} (next to ${t.existing})`).join(', ') : 'none'}`,
     r.unlistedHome === null ? unmeasured : `unlisted home: ${r.unlistedHome.length ? r.unlistedHome.join(', ') : 'none'}`,
+  ];
+}
+
+function formatText(r, unmeasured) {
+  const [shared, ...flags] = flagLines(r, unmeasured);
+  return [
+    `base: ${r.base.kind} ${r.base.ref.slice(0, 12)}${r.base.note ? ` (${r.base.note})` : ''}`,
+    `size: ${r.size}`,
+    shared,
+    `code: +${r.code.added} -${r.code.removed}  tests: +${r.tests.added} -${r.tests.removed}`,
+    ...r.files.map(fileLine),
+    ...flags,
   ].join('\n') + '\n';
 }
 
