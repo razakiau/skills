@@ -1327,6 +1327,43 @@ test('files a merge of the default branch brought in are not the session\'s', ()
   assert.deepEqual(hook(s), {});
 });
 
+test('files a merge of the default branch brought in after start are not the session\'s', () => {
+  const repo = makeBranchRepo();
+  run(repo, ['start']);
+  const s = { cwd: repo, session_id: 's1' };
+  git(repo, 'switch', '-q', 'main');
+  write(repo, 'm1.ts', lines(3));
+  write(repo, 'm2.ts', lines(3));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'main 2');
+  git(repo, 'switch', '-q', 'feat');
+  turn(s);
+  git(repo, 'merge', '-q', '--no-edit', 'main');
+  assert.deepEqual(hook(s), {});
+  turn(s);
+  write(repo, 'own1.ts', lines(2));
+  write(repo, 'own2.ts', lines(2));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  for (const line of ['A own1.ts +2 -0', 'A own2.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  const fileLines = body(out).filter((l) => l.startsWith('A ') || l.startsWith('M '));
+  assert.ok(!fileLines.some((l) => /\bm[12]\.ts\b/.test(l)), out.reason);
+});
+
+test('on the default branch, start still measures what the session committed', () => {
+  const repo = makeHookRepo();
+  run(repo, ['start']);
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'c1.ts', lines(2));
+  write(repo, 'c2.ts', lines(2));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'own');
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  for (const line of ['A c1.ts +2 -0', 'A c2.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+});
+
 test('edits made while answering an audit count toward the next one', () => {
   const repo = makeHookRepo();
   const s = { cwd: repo, session_id: 's1' };

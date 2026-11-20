@@ -1024,13 +1024,30 @@ function writeSince(paths, payload, record) {
   writeFileSync(sinceFile(paths, payload), `${JSON.stringify(record)}\n`);
 }
 
+// The code paths that differ between the merge base with the default branch and `tree`: what
+// the branch itself changed, so a merge of the default branch adds nothing. null (no filter) when
+// there is no default branch or merge base, and on the default branch itself, where the merge
+// base is HEAD and would hide what the session committed. A detached HEAD is not the default branch.
+function sinceMergeBase(top, tree) {
+  const ref = defaultBranch(top);
+  if (!ref) return null;
+  const name = ref.replace(/^refs\/heads\//, '').replace(/^refs\/remotes\/[^/]+\//, '');
+  if (tryGit(['symbolic-ref', '-q', '--short', 'HEAD'], { cwd: top }) === name) return null;
+  const mb = tryGit(['merge-base', 'HEAD', ref], { cwd: top });
+  if (!mb) return null;
+  const out = tryGit(['diff-tree', '-r', '-z', '--name-only', mb, tree, '--', ...CODE_SPECS], { cwd: top });
+  return out === null ? null : new Set(out.split('\0').filter(Boolean));
+}
+
 // The code this session changed in one repo since the hook last spoke to it (since its first
 // turn, if never): `{ since, tree, files, base, whole, label, tracked, absorbed }`, or null when
 // there is nothing to judge. A session with a turn record (`tracked`) counts only the paths its
 // turns changed, so the owner's edits between turns stay out. Without one (no session id, or the
 // harness never sent the turn start) only the payload's own repo is judged, from the base, then
 // from where the hook last spoke. A path counts only while it is in the whole change since the
-// base (`whole`), so files a merge of the default branch brought in are not the session's.
+// base (`whole`), so files a merge of the default branch brought in are not the session's. With
+// a `start` base the merged files still differ from the start snapshot, so on a branch other
+// than the default one a path must also differ from the merge base with it (`sinceMergeBase`).
 // What the session's subagents were audited for is laid over `since` first (`absorb`), so the
 // parent is not told it again. `strict` (the ask_user gate) judges nothing without a turn record;
 // `foldOnly` (Stop while the agent answers an audit) only adds to the record the turn's paths
@@ -1056,8 +1073,10 @@ function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
   if (foldOnly || (tracked && !turned.changed)) return null;
   const whole = readDiff(paths.top, base.ref, tree);
   const inWhole = new Set(whole.map((f) => f.path));
+  const branchOwn = base.kind === 'start' ? sinceMergeBase(paths.top, tree) : null;
   const wanted = want && new Set(want);
-  const files = delta.filter((f) => (!wanted || wanted.has(f.path)) && inWhole.has(f.path));
+  const files = delta.filter((f) => (!wanted || wanted.has(f.path)) && inWhole.has(f.path)
+    && (!branchOwn || branchOwn.has(f.path)));
   if (!files.some((f) => !f.test)) return null;
   const label = rec?.spoke ? 'since the last audit' : tracked ? "this session's change" : 'change since the base';
   return { since, tree, files, base, whole, label, tracked, absorbed };
