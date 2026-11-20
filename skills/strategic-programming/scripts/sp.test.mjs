@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -1533,225 +1533,6 @@ test('the --dup hint is given only when start was run', () => {
   assert.ok(outB.reason.includes('whole change since start '), outB.reason);
 });
 
-const child = (p) => call('child', p);
-// Records `kid` as a subagent started by `parent`, as SubagentStart does.
-const link = (repo, parent, kid) => child({ cwd: repo, sessionId: parent, agentId: kid, parentAgentId: parent });
-
-test('a parent is not told again what its subagent was audited for', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  assert.deepEqual(link(repo, 'P', 'C'), {});
-  turn(C);
-  for (const n of [1, 2, 3]) write(repo, `n${n}.ts`, lines(2));
-  assert.equal(hook(C).decision, 'block');
-  assert.deepEqual(hook(P), {}, 'the subagent was audited on it');
-  turn(P);
-  write(repo, 'n1.ts', lines(3));
-  write(repo, 'a.ts', lines(6));
-  const out = hook(P);
-  assert.equal(out.decision, 'block');
-  assert.deepEqual(body(out).slice(2, 4), ['M a.ts +1 -0', 'M n1.ts +1 -0'], out.reason);
-  assert.ok(body(out).includes('new files: none'), out.reason);
-});
-
-test('a subagent\'s small edit counts in the parent\'s sum', () => {
-  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  link(repo, 'P', 'C');
-  turn(C);
-  write(repo, 'a.ts', lines(6));
-  assert.deepEqual(hook(C), {}, 'one edited file is small');
-  write(repo, 'b.ts', lines(6));
-  const out = hook(P);
-  assert.equal(out.decision, 'block');
-  for (const line of ['M a.ts +1 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
-});
-
-test('a grandchild\'s audit covers the grandparent', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const G = { cwd: repo, sessionId: 'G' };
-  turn(P);
-  link(repo, 'P', 'C');
-  child({ cwd: repo, sessionId: 'C', agentId: 'G', parentAgentId: 'C' });
-  turn(G);
-  full(repo);
-  assert.equal(hook(G).decision, 'block');
-  assert.deepEqual(hook(P), {});
-});
-
-test('a link without parentAgentId uses the payload\'s session', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  assert.deepEqual(child({ cwd: repo, session_id: 'P', agent_id: 'C' }), {});
-  turn(C);
-  full(repo);
-  assert.equal(hook(C).decision, 'block');
-  assert.deepEqual(hook(P), {});
-});
-
-test('odd file names and a file deleted after the audit do not break the record', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  link(repo, 'P', 'C');
-  turn(C);
-  write(repo, 'my file.ts', lines(2));
-  write(repo, 'é.ts', lines(2));
-  assert.equal(hook(C).decision, 'block');
-  rmSync(join(repo, 'my file.ts'));
-  assert.deepEqual(hook(P), {});
-});
-
-test('child records nothing in a repo without a code map', () => {
-  const repo = makeRepo();
-  assert.deepEqual(child({ cwd: repo, sessionId: 'P', agentId: 'C' }), {});
-  assert.ok(!existsSync(join(repo, '.git', 'strategic-programming')));
-});
-
-test('the plugin wires SubagentStart to the child command', () => {
-  const hooks = JSON.parse(readFileSync(join(dirname(SP), '..', '..', '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
-  assert.ok(hooks.SubagentStart?.[0]?.hooks?.[0]?.command?.endsWith('sp.mjs" child'), JSON.stringify(hooks.SubagentStart));
-});
-
-// P with subagent C1 audited on two new files `n1.ts`, `n2.ts`.
-function parentWithAuditedChild() {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C1 = { cwd: repo, sessionId: 'C1' };
-  turn(P);
-  link(repo, 'P', 'C1');
-  turn(C1);
-  write(repo, 'n1.ts', lines(2));
-  write(repo, 'n2.ts', lines(2));
-  assert.equal(hook(C1).decision, 'block');
-  return { repo, P, record: join(stateOf(repo), `reported-${sidHash('C1')}`) };
-}
-
-// A second subagent C2 of P, audited on two more new files `n3.ts`, `n4.ts`.
-function secondChild(repo) {
-  const C2 = { cwd: repo, sessionId: 'C2' };
-  link(repo, 'P', 'C2');
-  turn(C2);
-  write(repo, 'n3.ts', lines(2));
-  write(repo, 'n4.ts', lines(2));
-  assert.equal(hook(C2).decision, 'block');
-}
-
-test('a torn entry in a subagent\'s record costs nothing, and later subagents are still taken over', () => {
-  const { repo, P, record } = parentWithAuditedChild();
-  appendFileSync(record, '100644 abc');
-  assert.deepEqual(hook(P), {});
-  secondChild(repo);
-  assert.deepEqual(hook(P), {});
-});
-
-test('a malformed entry is skipped and the rest of the record is still taken over', () => {
-  const { P, record } = parentWithAuditedChild();
-  appendFileSync(record, 'not an entry\0');
-  assert.deepEqual(hook(P), {});
-});
-
-test('an overlay that fails is not retried', () => {
-  const { repo, P, record } = parentWithAuditedChild();
-  appendFileSync(record, `0 ${'0'.repeat(40)} 100644 ${'1'.repeat(40)}\tghost.ts\0`);
-  // write-tree refuses the missing blob, so the overlay fails and P hears of C1's files once.
-  const first = hook(P);
-  assert.equal(first.decision, 'block');
-  for (const line of ['A n1.ts +2 -0', 'A n2.ts +2 -0']) assert.ok(body(first).includes(line), `${line}\n${first.reason}`);
-  secondChild(repo);
-  const out = hook(P);
-  const text = out.reason ?? '';
-  assert.ok(!text.includes('n3.ts') && !text.includes('n4.ts'), text);
-});
-
-test('files a subagent deleted are taken over as deleted', () => {
-  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  link(repo, 'P', 'C');
-  turn(C);
-  rmSync(join(repo, 'a.ts'));
-  rmSync(join(repo, 'b.ts'));
-  const out = hook(C);
-  assert.equal(out.decision, 'block');
-  for (const line of ['D a.ts +0 -5', 'D b.ts +0 -5']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
-  assert.deepEqual(hook(P), {});
-});
-
-test('a parent\'s own new file is still audited after its subagent edits it', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  const api = 'export function api() {\n  return 1;\n}\n';
-  turn(P);
-  write(repo, 'x.ts', api);
-  link(repo, 'P', 'C');
-  turn(C);
-  write(repo, 'x.ts', `${api}// more\n`);
-  write(repo, 'y.ts', lines(2));
-  const kid = hook(C);
-  assert.equal(kid.decision, 'block');
-  for (const line of ['M x.ts +1 -0', 'A y.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
-  const out = hook(P);
-  assert.equal(out.decision, 'block');
-  const b = body(out);
-  assert.ok(b.includes('A x.ts +4 -0'), out.reason);
-  const newFiles = b.find((l) => l.startsWith('new files:'));
-  assert.ok(newFiles.includes('x.ts') && !newFiles.includes('y.ts'), out.reason);
-  assert.ok(b.find((l) => l.startsWith('exports:')).includes('api'), out.reason);
-  assert.ok(!b.includes('A y.ts +2 -0'), out.reason);
-});
-
-test('a parent\'s small edit of a file still counts after its subagent is audited on that file', () => {
-  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  write(repo, 'a.ts', lines(6));
-  assert.deepEqual(hook(P), {});
-  link(repo, 'P', 'C');
-  turn(C);
-  write(repo, 'a.ts', lines(7));
-  write(repo, 'n1.ts', lines(2));
-  const kid = hook(C);
-  assert.equal(kid.decision, 'block');
-  for (const line of ['M a.ts +1 -0', 'A n1.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
-  assert.deepEqual(hook(P), {}, 'one edited file is small');
-  turn(P);
-  write(repo, 'b.ts', lines(6));
-  const out = hook(P);
-  assert.equal(out.decision, 'block');
-  for (const line of ['M a.ts +2 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
-  assert.ok(!out.reason.includes('n1.ts'), out.reason);
-});
-
-test('two audits of one subagent on the same file are both taken over', () => {
-  const repo = makeHookRepo();
-  const P = { cwd: repo, sessionId: 'P' };
-  const C = { cwd: repo, sessionId: 'C' };
-  turn(P);
-  link(repo, 'P', 'C');
-  turn(C);
-  write(repo, 'n1.ts', lines(2));
-  write(repo, 'n2.ts', lines(2));
-  assert.equal(hook(C).decision, 'block');
-  turn(C);
-  write(repo, 'n1.ts', lines(3));
-  write(repo, 'n2.ts', lines(3));
-  write(repo, 'n3.ts', lines(2));
-  assert.equal(hook(C).decision, 'block');
-  assert.deepEqual(hook(P), {});
-});
-
 test('a full list that cannot be written does not cost the audit', () => {
   const repo = makeHookRepo();
   const s = { cwd: repo, session_id: 's1' };
@@ -1762,4 +1543,76 @@ test('a full list that cannot be written does not cost the audit', () => {
   assert.equal(out.decision, 'block');
   assert.ok(body(out).includes('… and 5 more'), out.reason);
   assert.ok(!body(out).some((l) => l.startsWith('full list:')), out.reason);
+});
+
+// Runs `sp.mjs child` from os.tmpdir() with `input` on stdin, as SubagentStart did.
+function child(input) {
+  const r = spawnSync('node', [SP, 'child'], { cwd: tmpdir(), input, encoding: 'utf8' });
+  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+}
+
+// Every file name under the repo's strategic-programming folders.
+const spFiles = (repo) => {
+  const dir = join(repo, '.git', 'strategic-programming');
+  return existsSync(dir) ? readdirSync(dir, { recursive: true }).map(String) : [];
+};
+
+test('a parent is asked about the files its subagent wrote, after the subagent\'s own audit', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  child(JSON.stringify({ cwd: repo, sessionId: 'P', agentId: 'C', parentAgentId: 'P' }));
+  turn(C);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  const kid = hook(C);
+  assert.equal(kid.decision, 'block');
+  for (const line of ['A n1.ts +2 -0', 'A n2.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
+  const out = hook(P);
+  assert.equal(out.decision, 'block', 'the parent is asked too');
+  for (const line of ['A n1.ts +2 -0', 'A n2.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.deepEqual(hook(P), {});
+});
+
+test('child is a silent no-op that writes nothing, whatever is on stdin', () => {
+  const repo = makeHookRepo();
+  turn({ cwd: repo, sessionId: 'P' });
+  const before = spFiles(repo);
+  for (const input of [
+    JSON.stringify({ cwd: repo, sessionId: 'P', agentId: 'C', parentAgentId: 'P' }),
+    JSON.stringify({ cwd: repo, session_id: 'P', agent_id: 'C' }),
+    'not json {',
+    '',
+  ]) {
+    const r = child(input);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, '', input);
+    assert.equal(r.stderr, '', input);
+  }
+  assert.deepEqual(spFiles(repo), before);
+});
+
+test('the plugin does not wire SubagentStart', () => {
+  const hooks = JSON.parse(readFileSync(join(dirname(SP), '..', '..', '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
+  assert.ok(!('SubagentStart' in hooks), JSON.stringify(hooks.SubagentStart));
+});
+
+test('a since record that still carries an absorbed key is honoured', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, sessionId: 's1' };
+  turn(s);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  assert.equal(hook(s).decision, 'block');
+  const file = join(stateOf(repo), `since-${sidHash('s1')}`);
+  const rec = JSON.parse(readFileSync(file, 'utf8'));
+  writeFileSync(file, `${JSON.stringify({ ...rec, absorbed: { [sidHash('C')]: 2 } })}\n`);
+  assert.deepEqual(hook(s), {}, 'what the record says was audited is not told again');
+  write(repo, 'n3.ts', lines(2));
+  write(repo, 'n4.ts', lines(2));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  for (const line of ['A n3.ts +2 -0', 'A n4.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.ok(!out.reason.includes('n1.ts') && !out.reason.includes('n2.ts'), out.reason);
 });
