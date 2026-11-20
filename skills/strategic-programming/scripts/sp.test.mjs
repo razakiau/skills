@@ -1661,9 +1661,11 @@ test('a malformed entry is skipped and the rest of the record is still taken ove
 
 test('an overlay that fails is not retried', () => {
   const { repo, P, record } = parentWithAuditedChild();
-  appendFileSync(record, `100644 ${'1'.repeat(40)}\tghost.ts\0`);
+  appendFileSync(record, `0 ${'0'.repeat(40)} 100644 ${'1'.repeat(40)}\tghost.ts\0`);
   // write-tree refuses the missing blob, so the overlay fails and P hears of C1's files once.
-  assert.equal(hook(P).decision, 'block');
+  const first = hook(P);
+  assert.equal(first.decision, 'block');
+  for (const line of ['A n1.ts +2 -0', 'A n2.ts +2 -0']) assert.ok(body(first).includes(line), `${line}\n${first.reason}`);
   secondChild(repo);
   const out = hook(P);
   const text = out.reason ?? '';
@@ -1682,5 +1684,70 @@ test('files a subagent deleted are taken over as deleted', () => {
   const out = hook(C);
   assert.equal(out.decision, 'block');
   for (const line of ['D a.ts +0 -5', 'D b.ts +0 -5']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.deepEqual(hook(P), {});
+});
+
+test('a parent\'s own new file is still audited after its subagent edits it', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  const api = 'export function api() {\n  return 1;\n}\n';
+  turn(P);
+  write(repo, 'x.ts', api);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'x.ts', `${api}// more\n`);
+  write(repo, 'y.ts', lines(2));
+  const kid = hook(C);
+  assert.equal(kid.decision, 'block');
+  for (const line of ['M x.ts +1 -0', 'A y.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  const b = body(out);
+  assert.ok(b.includes('A x.ts +4 -0'), out.reason);
+  const newFiles = b.find((l) => l.startsWith('new files:'));
+  assert.ok(newFiles.includes('x.ts') && !newFiles.includes('y.ts'), out.reason);
+  assert.ok(b.find((l) => l.startsWith('exports:')).includes('api'), out.reason);
+  assert.ok(!b.includes('A y.ts +2 -0'), out.reason);
+});
+
+test('a parent\'s small edit of a file still counts after its subagent is audited on that file', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(P), {});
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'a.ts', lines(7));
+  write(repo, 'n1.ts', lines(2));
+  const kid = hook(C);
+  assert.equal(kid.decision, 'block');
+  for (const line of ['M a.ts +1 -0', 'A n1.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
+  assert.deepEqual(hook(P), {}, 'one edited file is small');
+  turn(P);
+  write(repo, 'b.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  for (const line of ['M a.ts +2 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.ok(!out.reason.includes('n1.ts'), out.reason);
+});
+
+test('two audits of one subagent on the same file are both taken over', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
+  turn(C);
+  write(repo, 'n1.ts', lines(3));
+  write(repo, 'n2.ts', lines(3));
+  write(repo, 'n3.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
   assert.deepEqual(hook(P), {});
 });

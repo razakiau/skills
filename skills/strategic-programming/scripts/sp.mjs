@@ -906,8 +906,8 @@ function descendants(common, hash) {
   return out;
 }
 
-// The file of what a session's audits covered in one repo: NUL-terminated
-// `update-index --index-info` entries, appended per audit; null without a session id.
+// The file of what a session's audits covered in one repo: NUL-terminated entries, appended per
+// audit (see `recordReported`); null without a session id.
 function reportedFile({ state }, hash) {
   return hash ? join(state, `reported-${hash}`) : null;
 }
@@ -918,34 +918,51 @@ function reportedEntries(paths, hash) {
   try { return readFileSync(reportedFile(paths, hash), 'utf8').split('\0').slice(0, -1); } catch { return []; }
 }
 
-// An entry `update-index --index-info` takes: `<octal mode> <sha>\t<path>`.
-const INDEX_ENTRY = /^[0-7]+ (?:[0-9a-f]{40}|[0-9a-f]{64})\t[^\0]+$/;
+// A reported entry: `<fromMode> <fromBlob> <mode> <blob>\t<path>`.
+const REPORTED_ENTRY = /^([0-7]+ (?:[0-9a-f]{40}|[0-9a-f]{64})) ([0-7]+ (?:[0-9a-f]{40}|[0-9a-f]{64}))\t([^\0]+)$/;
 
-// Appends what one audit covered: each file as it is in `tree`, and a path the tree no longer
-// holds (deleted, or a rename's old name) as absent. A failure only loses the record, so a
-// parent hears it again. Nothing without a session id.
-function recordReported(paths, payload, tree, files) {
+// The state `<mode> <blob>` of a path missing from a tree whose ids are as long as `sha`.
+const absentState = (sha) => `0 ${'0'.repeat(sha.length)}`;
+
+// The state `<mode> <blob>` of each of `want` in `tree` (a tree or commit), by path; a path the
+// tree does not hold is left out. One `ls-tree` for the whole tree: thousands of paths would not
+// fit on a command line.
+function pathStates(top, tree, want) {
+  const out = new Map();
+  for (const e of git(['ls-tree', '-r', '-z', tree], { cwd: top }).split('\0')) {
+    const tab = e.indexOf('\t');
+    if (tab < 0 || !want.has(e.slice(tab + 1))) continue;
+    const [mode, , blob] = e.slice(0, tab).split(' ');
+    out.set(e.slice(tab + 1), `${mode} ${blob}`);
+  }
+  return out;
+}
+
+// Appends what one audit covered, from the state each file had in `since` (where the audit
+// started) to the one it was audited at in `tree`; a path a tree does not hold (new, deleted,
+// or a rename's old name) is absent on that side, and a path whose two states are equal is left
+// out. A failure only loses the record, so a parent hears it again. Nothing without a session id.
+function recordReported(paths, payload, since, tree, files) {
   const file = reportedFile(paths, sessionHash(payload));
   if (!file || !files.length) return;
   try {
     const want = new Set(files.flatMap((f) => (f.from === undefined ? [f.path] : [f.path, f.from])));
-    const entries = new Map();
-    for (const e of git(['ls-tree', '-r', '-z', tree], { cwd: paths.top }).split('\0')) {
-      const tab = e.indexOf('\t');
-      if (tab < 0 || !want.has(e.slice(tab + 1))) continue;
-      const [mode, , blob] = e.slice(0, tab).split(' ');
-      entries.set(e.slice(tab + 1), `${mode} ${blob}`);
-    }
-    const zeros = '0'.repeat(tree.length);
-    appendFileSync(file, [...want].map((p) => `${entries.get(p) ?? `0 ${zeros}`}\t${p}\0`).join(''));
+    const before = pathStates(paths.top, since, want);
+    const after = pathStates(paths.top, tree, want);
+    const entries = [...want].map((p) => [before.get(p) ?? absentState(since), after.get(p) ?? absentState(tree), p])
+      .filter(([from, to]) => from !== to);
+    if (entries.length) appendFileSync(file, entries.map(([from, to, p]) => `${from} ${to}\t${p}\0`).join(''));
   } catch { /* the parent hears it again */ }
 }
 
 // `{ tree, absorbed }`: `since` with what the session's subagents were audited for laid over
 // it, so the parent is not told it again, and the count of each one's entries now taken in.
-// Only entries past `rec.absorbed` are new; a malformed one is skipped but counted as read.
-// Without a session id or new entries: `since` and the old counts. When the overlay fails:
-// `since` and the new counts, so one bad batch costs one repeat and is not retried forever.
+// Only entries past `rec.absorbed` are new. They are walked in order, and one is laid over only
+// when its path's current state (in `since`, or as an earlier entry of the walk set it) is the
+// one the subagent's audit started from: a file the parent changed before the subagent, and was
+// not audited on, stays in the parent's change. A skipped or malformed entry counts as read.
+// Without a session id or new entries: `since` and the old counts. When nothing is laid over,
+// or the overlay fails: `since` and the new counts, so one bad batch costs one repeat.
 function absorb(paths, payload, rec, since) {
   const old = rec?.absorbed ?? {};
   const hash = sessionHash(payload);
@@ -957,19 +974,31 @@ function absorb(paths, payload, rec, since) {
     const entries = reportedEntries(paths, kid);
     const done = Number.isInteger(old[kid]) ? old[kid] : 0;
     if (entries.length <= done) continue;
-    fresh.push(...entries.slice(done).filter((e) => INDEX_ENTRY.test(e)));
+    for (const e of entries.slice(done)) {
+      const m = REPORTED_ENTRY.exec(e);
+      if (m) fresh.push({ from: m[1], to: m[2], path: m[3] });
+    }
     absorbed[kid] = entries.length;
     read = true;
   }
   if (!read) return { tree: since, absorbed: old };
   if (!fresh.length) return { tree: since, absorbed };
+  let start;
+  try { start = pathStates(paths.top, since, new Set(fresh.map((e) => e.path))); } catch { return { tree: since, absorbed }; }
+  const stateIn = (p) => start.get(p) ?? absentState(since);
+  const current = new Map();
+  for (const e of fresh) {
+    if ((current.get(e.path) ?? stateIn(e.path)) === e.from) current.set(e.path, e.to);
+  }
+  const lay = [...current].filter(([p, state]) => state !== stateIn(p));
+  if (!lay.length) return { tree: since, absorbed };
   pruneSnapshots(paths.state);
   const index = join(paths.state, `snapshot.${process.pid}.index.overlay`);
   try {
     const env = { ...process.env, GIT_INDEX_FILE: index };
     git(['read-tree', since], { cwd: paths.top, env });
     git(['update-index', '-z', '--index-info'],
-      { cwd: paths.top, env, input: fresh.map((e) => `${e}\0`).join(''), stdio: ['pipe', 'pipe', 'ignore'] });
+      { cwd: paths.top, env, input: lay.map(([p, state]) => `${state}\t${p}\0`).join(''), stdio: ['pipe', 'pipe', 'ignore'] });
     return { tree: git(['write-tree'], { cwd: paths.top, env }).trim(), absorbed };
   } catch {
     return { tree: since, absorbed };
@@ -1146,7 +1175,7 @@ function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
     if (built.report.size === 'small') continue;
     writeSince(paths, payload, { tree: u.tree, paths: u.tracked ? [] : null, spoke: true, absorbed: u.absorbed });
     // A diff too large to judge was not audited, so a parent still hears of it.
-    if (!built.report.tooLarge) recordReported(paths, payload, u.tree, u.files);
+    if (!built.report.tooLarge) recordReported(paths, payload, u.since, u.tree, u.files);
     parts.push({ paths, built, u });
   }
   if (!parts.length) return null;
