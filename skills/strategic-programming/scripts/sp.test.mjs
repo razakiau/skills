@@ -1578,6 +1578,7 @@ test('a parent is asked about the files its subagent wrote, after the subagent\'
 test('child is a silent no-op that writes nothing, whatever is on stdin', () => {
   const repo = makeHookRepo();
   turn({ cwd: repo, sessionId: 'P' });
+  const before = spFiles(repo);
   for (const input of [
     JSON.stringify({ cwd: repo, sessionId: 'P', agentId: 'C', parentAgentId: 'P' }),
     JSON.stringify({ cwd: repo, session_id: 'P', agent_id: 'C' }),
@@ -1589,8 +1590,7 @@ test('child is a silent no-op that writes nothing, whatever is on stdin', () => 
     assert.equal(r.stdout, '', input);
     assert.equal(r.stderr, '', input);
   }
-  const files = spFiles(repo);
-  assert.ok(!files.some((f) => /(^|\/)(children|reported)-/.test(f)), files.join());
+  assert.deepEqual(spFiles(repo), before);
 });
 
 test('the plugin does not wire SubagentStart', () => {
