@@ -1360,6 +1360,29 @@ test('a since record whose tree is gone falls back to the turn start', () => {
   const out = hook(s);
   assert.equal(out.decision, 'block');
   assert.ok(body(out).includes('M b.ts +1 -0') && body(out).includes('M c.ts +1 -0'), out.reason);
+  assert.ok(!out.reason.includes('a.ts'), out.reason);
+});
+
+test('the owner\'s later edit of an audited file is not the session\'s', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  write(repo, 'b.ts', lines(6));
+  assert.equal(hook(s).decision, 'block');
+  assert.deepEqual(hook({ ...s, stop_hook_active: true }), {});
+  const rec = JSON.parse(readFileSync(join(stateOf(repo), `since-${sidHash('s1')}`), 'utf8'));
+  assert.deepEqual(rec.paths, [], 'audited files do not come back on a later call of the same turn');
+  write(repo, 'a.ts', lines(9)); // the owner
+  turn(s);
+  write(repo, 'c.ts', lines(6));
+  assert.deepEqual(hook(s), {}, 'only c.ts is the session\'s: small');
+  turn(s);
+  write(repo, 'b.ts', lines(7));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.deepEqual(body(out).slice(2, 4), ['M b.ts +1 -0', 'M c.ts +1 -0'], out.reason);
+  assert.ok(!body(out).some((l) => l.includes('a.ts')), out.reason);
 });
 
 test('in two worktrees, only the one past a small change is named', () => {

@@ -921,8 +921,12 @@ function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
   const rec = readSince(paths, payload);
   const base = findBase(paths);
   const since = rec?.tree ?? (tracked ? turned.from : base.ref);
+  const delta = readDiff(paths.top, since, tree);
+  // A turn path joins only while it differs from `since`: a file the audit already covered
+  // stays out, so the owner's later edit of it is not the session's.
+  const moved = new Set(delta.map((f) => f.path));
   const want = tracked && rec?.paths !== null
-    ? [...new Set([...(rec?.paths ?? []), ...turned.files.map((f) => f.path)])].sort() : null;
+    ? [...new Set([...(rec?.paths ?? []), ...turned.files.map((f) => f.path).filter((p) => moved.has(p))])].sort() : null;
   const absorbed = rec?.absorbed ?? {};
   const next = { tree: since, paths: want, spoke: rec?.spoke ?? false, absorbed };
   // An untracked session gets a record only once the hook speaks to it.
@@ -931,7 +935,7 @@ function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
   const whole = readDiff(paths.top, base.ref, tree);
   const inWhole = new Set(whole.map((f) => f.path));
   const wanted = want && new Set(want);
-  const files = readDiff(paths.top, since, tree).filter((f) => (!wanted || wanted.has(f.path)) && inWhole.has(f.path));
+  const files = delta.filter((f) => (!wanted || wanted.has(f.path)) && inWhole.has(f.path));
   if (!files.some((f) => !f.test)) return null;
   const label = rec?.spoke ? 'since the last audit' : tracked ? "this session's change" : 'change since the base';
   return { since, tree, files, base, whole, label, tracked, absorbed };
