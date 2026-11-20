@@ -1751,3 +1751,15 @@ test('two audits of one subagent on the same file are both taken over', () => {
   assert.equal(hook(C).decision, 'block');
   assert.deepEqual(hook(P), {});
 });
+
+test('a full list that cannot be written does not cost the audit', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  for (let i = 0; i < 25; i++) write(repo, `n/f${String(i).padStart(2, '0')}.ts`, `export const v${i} = ${i};\n`);
+  mkdirSync(join(stateOf(repo), `audit-${sidHash('s1')}.txt`));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(body(out).includes('… and 5 more'), out.reason);
+  assert.ok(!body(out).some((l) => l.startsWith('full list:')), out.reason);
+});

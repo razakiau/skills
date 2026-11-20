@@ -492,9 +492,9 @@ function measured(what, fn, fallback) {
 // The audit of the change since the base: the report object, why unlisted home is not
 // measured (null when it is), and the snapshot tree it measured. `tree` reuses a snapshot
 // the caller just took.
-function buildReport(paths, tree = codeSnapshot(paths), opts = {}) {
+function buildReport(paths, tree = codeSnapshot(paths)) {
   const base = findBase(paths);
-  return reportOf(paths, base, tree, readDiff(paths.top, base.ref, tree), opts);
+  return reportOf(paths, base, tree, readDiff(paths.top, base.ref, tree));
 }
 
 // The audit of `files`, the code diff from `base.ref` to `tree` (code files only: every
@@ -1136,12 +1136,17 @@ function fullListFile({ state }, payload) {
 }
 
 // Keeps the uncut text in the full-list file when the shown one was cut, and returns the line
-// naming it; otherwise removes a stale file and returns ''.
+// naming it; otherwise removes a stale file and returns ''. A file that cannot be written or
+// removed only drops the line: the audit is still given, cut.
 function fullListLine(paths, payload, shown, whole) {
   const file = fullListFile(paths, payload);
-  if (whole === null || shown === whole) { rmSync(file, { force: true }); return ''; }
-  writeFileSync(file, whole);
-  return `full list: ${file}\n`;
+  try {
+    if (whole === null || shown === whole) { rmSync(file, { force: true }); return ''; }
+    writeFileSync(file, whole);
+    return `full list: ${file}\n`;
+  } catch {
+    return '';
+  }
 }
 
 // The whole change since the base as totals only: its audit is the skill's step 8.
@@ -1166,6 +1171,8 @@ function hookText({ paths, built, u }, payload) {
 
 // The audit text for every judged repo whose unreported change is past Small, or null. A Small
 // one stays unreported and adds to the next turn's; a repo that speaks starts a new one from now.
+// The whole text is composed before any repo is recorded as spoken, so nothing that throws can
+// lose an audit; a record that fails to write only repeats it next turn.
 function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
   const parts = [];
   for (const paths of hookRepos(payload)) {
@@ -1173,19 +1180,24 @@ function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
     if (!u) continue;
     const built = reportOf(paths, { ref: u.since, kind: 'since' }, u.tree, u.files, { cap: true });
     if (built.report.size === 'small') continue;
-    writeSince(paths, payload, { tree: u.tree, paths: u.tracked ? [] : null, spoke: true, absorbed: u.absorbed });
-    // A diff too large to judge was not audited, so a parent still hears of it.
-    if (!built.report.tooLarge) recordReported(paths, payload, u.since, u.tree, u.files);
     parts.push({ paths, built, u });
   }
   if (!parts.length) return null;
   const body = parts.map((part) => hookText(part, payload)).join('\n');
   // `audit --dup` compares with the start point: only a repo where `start` was run has one.
-  return 'strategic-programming audit (see the strategic-programming skill):\n'
+  const text = 'strategic-programming audit (see the strategic-programming skill):\n'
     + `${body}\nAnswer every flag above against your `
     + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
     + (parts.some(({ built, u }) => !built.report.tooLarge && u.base.kind === 'start')
       ? ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.` : '');
+  for (const { paths, built, u } of parts) {
+    try {
+      writeSince(paths, payload, { tree: u.tree, paths: u.tracked ? [] : null, spoke: true, absorbed: u.absorbed });
+      // A diff too large to judge was not audited, so a parent still hears of it.
+      if (!built.report.tooLarge) recordReported(paths, payload, u.since, u.tree, u.files);
+    } catch { /* the audit is given again next turn */ }
+  }
+  return text;
 }
 
 // Stop hook: blocks the end of a turn with the audit. While the agent answers one
