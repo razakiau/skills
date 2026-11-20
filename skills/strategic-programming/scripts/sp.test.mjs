@@ -1439,3 +1439,59 @@ test('a turn that changed nothing writes no since record', () => {
   assert.deepEqual(hook(s), {});
   assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('since')), readdirSync(stateOf(repo)).join());
 });
+
+const auditFiles = (repo) => readdirSync(stateOf(repo)).filter((f) => f.startsWith('audit'));
+
+test('lists are cut at 20 files and 10 names, and the full text is in a file', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  for (let i = 0; i < 60; i++) write(repo, `n/f${String(i).padStart(2, '0')}.ts`, `export const v${i} = ${i};\n`);
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  const b = body(out);
+  assert.equal(b.filter((l) => /^A n\/f\d+\.ts /.test(l)).length, 20, out.reason);
+  assert.ok(b.includes('… and 40 more'), out.reason);
+  assert.match(out.reason, /\nnew files: (n\/f\d+\.ts, ){10}… and 50 more\n/);
+  assert.match(out.reason, /\nexports: (v\d+, ){10}… and 50 more\n/);
+  assert.ok(b.length <= 40, out.reason);
+  const file = /\nfull list: (.+)\n/.exec(out.reason)?.[1];
+  assert.ok(file?.startsWith(stateOf(repo)), out.reason);
+  assert.equal(file, join(stateOf(repo), `audit-${sidHash('s1')}.txt`));
+  assert.equal(readFileSync(file, 'utf8').split('\n').filter((l) => /^A n\/f\d+\.ts /.test(l)).length, 60);
+  assert.match(out.reason, /\nfull list: .+\nwhole change since /, 'the file line comes before the whole change');
+
+  turn(s);
+  full(repo);
+  assert.ok(!hook(s).reason.includes('full list:'));
+  assert.deepEqual(auditFiles(repo), [], 'an audit that fits removes the stale file');
+});
+
+test('an audit that fits names no file', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  full(repo);
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(!out.reason.includes('full list:'), out.reason);
+  assert.deepEqual(auditFiles(repo), []);
+});
+
+test('the --dup hint is given only when start was run', () => {
+  const hint = `For a Full change also run \`node "${SP}" audit --dup\` in that repo.`;
+  const a = makeHookRepo();
+  turn({ cwd: a, session_id: 's1' });
+  full(a);
+  const outA = hook({ cwd: a, session_id: 's1' });
+  assert.equal(outA.decision, 'block');
+  assert.ok(!outA.reason.includes('--dup'), outA.reason);
+
+  const b = makeHookRepo();
+  assert.equal(run(b, ['start']).code, 0);
+  turn({ cwd: b, session_id: 's1' });
+  full(b);
+  const outB = hook({ cwd: b, session_id: 's1' });
+  assert.ok(outB.reason.includes(hint), outB.reason);
+  assert.ok(outB.reason.includes('whole change since start '), outB.reason);
+});

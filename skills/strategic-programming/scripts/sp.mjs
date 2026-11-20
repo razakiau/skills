@@ -943,13 +943,35 @@ function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
 
 const fileLine = (f) => `${f.status} ${f.path} +${f.added} -${f.removed}`;
 
+// The hook's caps: file lines, and names in each flag list. The full text goes to a file.
+const MAX_HOOK_FILES = 20;
+const MAX_HOOK_NAMES = 10;
+
+// The first `max` items, then `… and <n> more` for the rest.
+const cut = (items, max) => (items.length > max ? [...items.slice(0, max), `… and ${items.length - max} more`] : items);
+
 // The text of an unreported change: its label, size and totals, its files, then the flags.
-function deltaText(r, unmeasured, { label }) {
+function deltaText(r, unmeasured, { label, maxFiles = Infinity, maxNames = Infinity } = {}) {
   return [
     `${label}: ${r.size}  code +${r.code.added} -${r.code.removed}  tests +${r.tests.added} -${r.tests.removed}`,
-    ...r.files.map(fileLine),
-    ...flagLines(r, unmeasured),
+    ...cut(r.files.map(fileLine), maxFiles),
+    ...flagLines(r, unmeasured, maxNames),
   ].join('\n') + '\n';
+}
+
+// The full-list file of a session's audit in one repo (`audit.txt` without a session id).
+function fullListFile({ state }, payload) {
+  const hash = sessionHash(payload);
+  return join(state, hash ? `audit-${hash}.txt` : 'audit.txt');
+}
+
+// Keeps the uncut text in the full-list file when the shown one was cut, and returns the line
+// naming it; otherwise removes a stale file and returns ''.
+function fullListLine(paths, payload, shown, whole) {
+  const file = fullListFile(paths, payload);
+  if (whole === null || shown === whole) { rmSync(file, { force: true }); return ''; }
+  writeFileSync(file, whole);
+  return `full list: ${file}\n`;
 }
 
 // The whole change since the base as totals only: its audit is the skill's step 8.
@@ -960,14 +982,16 @@ function wholeText(base, files) {
     + 'whole-change audit: step 8, before the pull request\n';
 }
 
-// One repo's part of the audit: the unreported change, then the whole change as totals.
-function hookText({ paths, built, u }) {
+// One repo's part of the audit: the unreported change, cut to the caps (with the line naming
+// the full list when cut), then the whole change as totals.
+function hookText({ paths, built, u }, payload) {
   const r = built.report;
   const head = paths.own ? '' : `repo: ${paths.top}\n`;
   const delta = r.tooLarge
     ? `diff too large to judge (${r.files.filter((f) => !f.test).length} files, +${r.code.added}); check the base or .gitignore\n`
-    : deltaText(r, built.unmeasured, { label: u.label });
-  return head + delta + wholeText(u.base, u.whole);
+    : deltaText(r, built.unmeasured, { label: u.label, maxFiles: MAX_HOOK_FILES, maxNames: MAX_HOOK_NAMES });
+  const whole = r.tooLarge ? null : deltaText(r, built.unmeasured, { label: u.label });
+  return head + delta + fullListLine(paths, payload, delta, whole) + wholeText(u.base, u.whole);
 }
 
 // The audit text for every judged repo whose unreported change is past Small, or null. A Small
@@ -983,12 +1007,13 @@ function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
     parts.push({ paths, built, u });
   }
   if (!parts.length) return null;
-  const body = parts.map(hookText).join('\n');
+  const body = parts.map((part) => hookText(part, payload)).join('\n');
+  // `audit --dup` compares with the start point: only a repo where `start` was run has one.
   return 'strategic-programming audit (see the strategic-programming skill):\n'
     + `${body}\nAnswer every flag above against your `
     + 'placement note: remove the code, justify it, or (unlisted home) add a code-map row or move the file. The numbers stand.'
-    + (parts.every(({ built }) => built.report.size === 'small' || built.report.tooLarge) ? ''
-      : ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.`);
+    + (parts.some(({ built, u }) => !built.report.tooLarge && u.base.kind === 'start')
+      ? ` For a Full change also run \`node "${SELF}" audit --dup\` in that repo.` : '');
 }
 
 // Stop hook: blocks the end of a turn with the audit. While the agent answers one
@@ -1019,21 +1044,23 @@ function ask() {
 }
 
 // The five flag lines of a report: shared, new files, exports, tests beside, unlisted home.
-function flagLines(r, unmeasured) {
+// `maxNames` (the hook) cuts each list of names; the `audit` command prints them all.
+function flagLines(r, unmeasured, maxNames = Infinity) {
+  const names = (items) => cut(items, maxNames).join(', ');
   // TS/JS files give names or "none"; other languages are named as not measured.
   const code = r.files.filter((f) => !f.test);
   const other = [...new Set(code.map((f) => ext(f.path)).filter((e) => !JS_EXT.has(e)))].sort();
   const js = code.some((f) => JS_EXT.has(ext(f.path)));
   const exportsLine = r.exports === null ? 'not measured (error)'
-    : [js || !other.length ? (r.exports.map((e) => e.name).join(', ') || 'none') : '',
+    : [js || !other.length ? (names(r.exports.map((e) => e.name)) || 'none') : '',
       other.length ? `not measured (${other.join(', ')})` : ''].filter(Boolean).join('; ');
   return [
-    `shared: ${r.shared === null ? 'not measured (graph)' : r.shared.length ? r.shared.join(', ') : 'none'}`,
-    `new files: ${r.newFiles.length ? r.newFiles.join(', ') : 'none'}`,
+    `shared: ${r.shared === null ? 'not measured (graph)' : r.shared.length ? names(r.shared) : 'none'}`,
+    `new files: ${r.newFiles.length ? names(r.newFiles) : 'none'}`,
     `exports: ${exportsLine}`,
     `tests beside: ${r.testBeside === null ? 'not measured (error)'
-      : r.testBeside.length ? r.testBeside.map((t) => `${t.added} (next to ${t.existing})`).join(', ') : 'none'}`,
-    r.unlistedHome === null ? unmeasured : `unlisted home: ${r.unlistedHome.length ? r.unlistedHome.join(', ') : 'none'}`,
+      : r.testBeside.length ? names(r.testBeside.map((t) => `${t.added} (next to ${t.existing})`)) : 'none'}`,
+    r.unlistedHome === null ? unmeasured : `unlisted home: ${r.unlistedHome.length ? names(r.unlistedHome) : 'none'}`,
   ];
 }
 
