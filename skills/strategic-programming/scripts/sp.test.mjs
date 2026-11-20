@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -848,35 +848,33 @@ const ANSWER = 'Answer every flag above against your placement note: remove the 
 
 test('blocks once when code changed, then stays silent on the same diff', () => {
   const repo = makeHookRepo();
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   const out = hook({ cwd: repo, stop_hook_active: false });
   assert.equal(out.decision, 'block');
-  assert.ok(out.reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nbase: '), out.reason);
+  assert.ok(out.reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nchange since the base: full'), out.reason);
   assert.deepEqual(Object.keys(out).sort(), ['decision', 'hookSpecificOutput', 'reason']);
   assert.deepEqual(out.hookSpecificOutput, { hookEventName: 'Stop', decision: 'block', reason: out.reason });
-  assert.match(out.reason, /\nsize: small\n/);
   assert.ok(out.reason.includes(ANSWER), out.reason);
-  assert.equal(git(repo, 'status', '--porcelain'), 'M a.ts', 'the hook writes nothing in the working tree');
+  assert.equal(git(repo, 'status', '--porcelain'), 'M a.ts\n?? n6.ts', 'the hook writes nothing in the working tree');
 
   assert.deepEqual(hook({ cwd: repo, stop_hook_active: false }), {});
   write(repo, 'README.md', 'docs\n');
   assert.deepEqual(hook({ cwd: repo }), {}, 'a docs edit is not a new code diff');
   write(repo, 'a.ts', lines(7));
-  assert.equal(hook({ cwd: repo, stop_hook_active: false }).decision, 'block');
-  assert.deepEqual(hook({ cwd: repo }), {});
+  assert.deepEqual(hook({ cwd: repo, stop_hook_active: false }), {}, 'one file edited since the audit is small');
   write(repo, 'a.test.ts', lines(2, 't'));
-  assert.equal(hook({ cwd: repo }).decision, 'block', 'a test edit beside the code change is a new diff');
+  assert.deepEqual(hook({ cwd: repo }), {}, 'a test beside it keeps the change small');
 });
 
 test('the hook still opts in through the old .agents/code-map.md', () => {
   const repo = makeRepo({ 'a.ts': lines(5), '.agents/code-map.md': MAP['docs/code-map.md'] });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(hook({ cwd: repo, stop_hook_active: false }).decision, 'block');
 });
 
 test('silent when already continuing', () => {
   const repo = makeHookRepo();
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.deepEqual(hook({ cwd: repo, stop_hook_active: true }), {});
   assert.deepEqual(hook({ cwd: repo, stopHookActive: true }), {});
   assert.equal(hook({ cwd: repo, stopHookActive: false }).decision, 'block');
@@ -888,7 +886,7 @@ test('silent without code changes', () => {
   assert.deepEqual(hook({ cwd: repo }), {});
   write(repo, 'a.test.ts', lines(3, 't'));
   assert.deepEqual(hook({ cwd: repo }), {});
-  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('since')), 'a silent run writes no since record');
 });
 
 test('silent outside a repo or on bad input', () => {
@@ -902,22 +900,6 @@ test('silent outside a repo or on bad input', () => {
   assert.deepEqual(turn(''), {});
 });
 
-test('the --dup hint is given for a full change, not a small one', () => {
-  const dup = `node "${SP}" audit --dup`;
-  const small = makeHookRepo();
-  write(small, 'a.ts', lines(6));
-  const s = hook({ cwd: small });
-  assert.equal(s.decision, 'block');
-  assert.ok(!s.reason.includes('--dup'), s.reason);
-
-  const full = makeHookRepo();
-  write(full, 'a.ts', lines(6));
-  write(full, 'b.ts', lines(2));
-  const f = hook({ cwd: full });
-  assert.match(f.reason, /\nsize: full\n/);
-  assert.ok(f.reason.includes(`For a Full change also run \`${dup}\` in that repo.`), f.reason);
-});
-
 // A feature branch off main that already holds a committed code change.
 function makeBranchRepo() {
   const repo = makeHookRepo();
@@ -928,11 +910,24 @@ function makeBranchRepo() {
   return repo;
 }
 
+// A change the hook must speak about: one edited and one new code file.
+const full = (repo, n = 6) => { write(repo, 'a.ts', lines(n)); write(repo, `n${n}.ts`, lines(2)); };
+const body = (out) => (out.reason ?? out.permissionDecisionReason).split('\n');
+// A feature branch that already holds `n` committed new code files.
+function makeBigBranch(n) {
+  const repo = makeHookRepo();
+  git(repo, 'checkout', '-q', '-b', 'feat');
+  for (let i = 0; i < n; i++) write(repo, `big/f${i}.ts`, lines(2));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'big');
+  return repo;
+}
+
 test('a turn with no code change stays silent even when the branch has code', () => {
   const repo = makeBranchRepo();
   assert.deepEqual(turn({ cwd: repo, session_id: 's1' }), {});
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
-  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('since')), 'a silent run writes no since record');
   assert.equal(hook({ cwd: repo, session_id: 'never-sent-a-prompt' }).decision, 'block',
     'without a turn record the hook judges the diff since the base');
   assert.equal(git(repo, 'status', '--porcelain'), '', 'turn and hook write nothing in the working tree');
@@ -941,11 +936,11 @@ test('a turn with no code change stays silent even when the branch has code', ()
 test('a turn where the agent changed code blocks', () => {
   const repo = makeBranchRepo();
   turn({ cwd: repo, sessionId: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   const out = hook({ cwd: repo, sessionId: 's1' });
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /\nM a\.ts \+1 -0\n/);
-  assert.match(out.reason, /\nA b\.ts \+4 -0\n/, 'the reason is still the whole audit since the base');
+  assert.ok(!out.reason.includes('b.ts'), out.reason);
 });
 
 test('a turn that changed only tests or docs stays silent', () => {
@@ -959,7 +954,7 @@ test('a turn that changed only tests or docs stays silent', () => {
 test('user edits between turns are not judged', () => {
   const repo = makeHookRepo();
   turn({ cwd: repo, session_id: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   write(repo, 'a.ts', lines(8));
   turn({ cwd: repo, session_id: 's1' });
@@ -969,10 +964,10 @@ test('user edits between turns are not judged', () => {
 test('sessions are separate', () => {
   const repo = makeHookRepo();
   turn({ cwd: repo, session_id: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   turn({ cwd: repo, session_id: 's2' });
   assert.deepEqual(hook({ cwd: repo, session_id: 's2' }), {}, 's2 did not change code in its turn');
-  assert.ok(!readdirSync(stateOf(repo)).includes('hook-fingerprint'), 'a silent run writes no fingerprint');
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('since')), 'a silent run writes no since record');
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
 });
 
@@ -988,7 +983,7 @@ test('without a session id the hook judges the base diff and turn records nothin
 test('main moving under the same content stays silent', () => {
   const repo = makeBranchRepo();
   turn({ cwd: repo, session_id: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   git(repo, 'switch', '-q', 'main');
   write(repo, 'c.ts', lines(3));
@@ -1013,8 +1008,8 @@ test('a merge conflict on a non-code file does not stop the snapshot', () => {
   assert.match(git(repo, 'status', '--porcelain'), /^UU notes\.md$/m);
   turn({ cwd: repo, session_id: 's1' });
   assert.ok(readdirSync(stateOf(repo)).some((f) => f.startsWith('turn-')), 'turn records');
-  write(repo, 'a.ts', lines(6));
-  assert.deepEqual(audit(repo).files.map((f) => f.path), ['a.ts']);
+  full(repo);
+  assert.deepEqual(audit(repo).files.map((f) => f.path), ['a.ts', 'n6.ts']);
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
 });
 
@@ -1027,6 +1022,7 @@ test('turn and hook leave the real index alone and no private index behind', () 
   const before = readFileSync(index).toString('hex');
   turn({ cwd: repo, session_id: 's1' });
   write(repo, 'b.ts', lines(6));
+  write(repo, 'c.ts', lines(2));
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   assert.equal(readFileSync(index).toString('hex'), before);
   assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('snapshot.')), readdirSync(stateOf(repo)).join());
@@ -1046,14 +1042,14 @@ test('no opt-in means silent', () => {
   write(started, 'a.ts', lines(6));
   assert.deepEqual(hook({ cwd: started, session_id: 's1' }), {}, 'a recorded start alone does not opt in');
   assert.deepEqual(hook({ cwd: started }), {});
-  assert.ok(!readdirSync(stateOf(started)).some((f) => f.startsWith('turn-') || f === 'hook-fingerprint'),
+  assert.ok(!readdirSync(stateOf(started)).some((f) => f.startsWith('turn-') || f.startsWith('since')),
     readdirSync(stateOf(started)).join());
 });
 
 test('after a block, committing the same change stays silent', () => {
   const repo = makeBranchRepo();
   turn({ cwd: repo, session_id: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(hook({ cwd: repo, session_id: 's1' }).decision, 'block');
   git(repo, 'commit', '-q', '-am', 'work');
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {});
@@ -1072,7 +1068,7 @@ function makeWorktreeSetup() {
 test('a worktree with a code map that the session edited is judged when the hook runs from the main checkout', () => {
   const { main, wt } = makeWorktreeSetup();
   assert.deepEqual(turn({ cwd: main, session_id: 's1' }), {});
-  write(wt, 'a.ts', lines(6));
+  full(wt);
   assert.deepEqual(call('edited', { cwd: main, session_id: 's1', tool_name: 'Edit', tool_input: { file_path: join(wt, 'a.ts') } }), {});
   const out = hook({ cwd: main, session_id: 's1' });
   assert.equal(out.decision, 'block');
@@ -1095,7 +1091,7 @@ const asked = (payload) => call('asked', payload);
 test('ask_user is held once with the audit when the turn changed code', () => {
   const repo = makeHookRepo();
   turn({ cwd: repo, session_id: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'read_file' }), {}, 'other tools pass');
   const out = ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' });
   assert.equal(out.permissionDecision, 'deny');
@@ -1103,7 +1099,7 @@ test('ask_user is held once with the audit when the turn changed code', () => {
   assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
   const reason = out.hookSpecificOutput.permissionDecisionReason;
   assert.equal(out.permissionDecisionReason, reason);
-  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nthis turn: '), reason);
+  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nthis session\'s change: '), reason);
   assert.ok(reason.includes('then call ask_user again'), reason);
   assert.deepEqual(ask({ cwd: repo, session_id: 's1', tool_name: 'ask_user' }), {}, 'the same diff passes the second time');
   assert.deepEqual(hook({ cwd: repo, session_id: 's1' }), {}, 'and Stop does not repeat it');
@@ -1119,29 +1115,17 @@ test('ask_user passes when the turn changed no code', () => {
 test('the reply to ask_user starts a new turn, so edits made while waiting are not judged', () => {
   const repo = makeHookRepo();
   turn({ cwd: repo, sessionId: 's1' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }).permissionDecision, 'deny', 'camelCase payloads too');
   assert.deepEqual(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {});
   assert.deepEqual(asked({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {});
-  write(repo, 'a.ts', lines(8));
+  full(repo, 8);
   assert.deepEqual(asked({ cwd: repo, sessionId: 's1', toolName: 'read_file' }), {}, 'other tools do not re-record');
   assert.equal(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }).permissionDecision, 'deny',
     'without a re-record the edit counts as the agent\'s');
-  write(repo, 'a.ts', lines(9));
+  full(repo, 9);
   asked({ cwd: repo, sessionId: 's1', toolName: 'ask_user' });
   assert.deepEqual(ask({ cwd: repo, sessionId: 's1', toolName: 'ask_user' }), {}, 'an edit before the reply is the owner\'s');
-});
-
-test('the hook reason lists at most 40 files', () => {
-  const files = Object.fromEntries(Array.from({ length: 45 }, (_, i) => [`f${i}.ts`, lines(2)]));
-  const repo = makeHookRepo(files);
-  for (const p of Object.keys(files)) write(repo, p, lines(3));
-  const out = hook({ cwd: repo });
-  assert.equal(out.decision, 'block');
-  assert.equal(out.reason.match(/^M f\d+\.ts /gm).length, 40);
-  assert.ok(out.reason.includes('… and 5 more (run audit for the full list)'), out.reason);
-  const full = run(repo, ['audit']);
-  assert.equal(full.stdout.match(/^M f\d+\.ts /gm).length, 45, 'audit itself is not capped');
 });
 
 const edited = (payload) => call('edited', payload);
@@ -1167,7 +1151,7 @@ test('another session\'s edit in another worktree is not judged by this session'
   const { main, wt1, wt2 } = makeTwoWorktrees();
   turn({ cwd: main, session_id: 'A' });
   turn({ cwd: main, session_id: 'B' });
-  write(wt2, 'a.ts', lines(6)); // session B's edit
+  full(wt2); // session B's edit
   assert.deepEqual(hook({ cwd: main, session_id: 'A' }), {}, 'A has no edited record: only its own repo is judged');
   edited({ cwd: main, session_id: 'A', tool_name: 'Edit', tool_input: { file_path: join(wt1, 'notes.md') } });
   assert.deepEqual(hook({ cwd: main, session_id: 'A' }), {}, 'A edited wt1 only, and no code there');
@@ -1183,7 +1167,8 @@ test('without an edited record only the payload\'s own repo is judged, never oth
   write(main, 'docs/code-map.md', MAP['docs/code-map.md']);
   turn({ cwd: main, session_id: 's1' });
   write(main, 'a.ts', lines(7));
-  write(wt, 'a.ts', lines(6));
+  write(main, 'm.ts', lines(2));
+  full(wt);
   const out = hook({ cwd: main, session_id: 's1' });
   assert.equal(out.decision, 'block');
   assert.ok(!out.reason.includes('repo: '), out.reason);
@@ -1195,7 +1180,7 @@ test('one session blocked on a diff does not hide it from another session', () =
   const repo = makeHookRepo();
   turn({ cwd: repo, session_id: 'A' });
   turn({ cwd: repo, session_id: 'B' });
-  write(repo, 'a.ts', lines(6));
+  full(repo);
   assert.equal(hook({ cwd: repo, session_id: 'A' }).decision, 'block');
   assert.deepEqual(hook({ cwd: repo, session_id: 'A' }), {}, 'A sees it once');
   assert.equal(hook({ cwd: repo, session_id: 'B' }).decision, 'block', 'B still gets it');
@@ -1261,16 +1246,520 @@ test('vendored paths are not measured, and a huge diff gets a one-line note in t
   assert.doesNotMatch(out.reason, /\nsize: /);
 });
 
-test('the hook reason leads with what this turn changed', () => {
-  const repo = makeBranchRepo();
-  turn({ cwd: repo, session_id: 's1' });
+test('a one-file edit on a branch that already holds 500 new files stays silent', () => {
+  const repo = makeBigBranch(500);
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(s), {});
+});
+
+test('small turns add up, then one audit lists them, and later audits do not repeat it', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(s), {}, 'one edited file is small');
+  turn(s);
+  write(repo, 'b.ts', lines(6));
+  const first = hook(s);
+  assert.equal(first.decision, 'block');
+  assert.equal(body(first)[1], "this session's change: full  code +2 -0  tests +0 -0", first.reason);
+  assert.deepEqual(body(first).slice(2, 4), ['M a.ts +1 -0', 'M b.ts +1 -0']);
+  turn(s);
+  write(repo, 'c.ts', lines(6));
+  assert.deepEqual(hook(s), {}, 'one file since the audit is small');
+  turn(s);
   write(repo, 'a.ts', lines(7));
-  const out = hook({ cwd: repo, session_id: 's1' });
+  const second = hook(s);
+  assert.equal(second.decision, 'block');
+  assert.equal(body(second)[1], 'since the last audit: full  code +2 -0  tests +0 -0', second.reason);
+  assert.deepEqual(body(second).slice(2, 4), ['M a.ts +1 -0', 'M c.ts +1 -0']);
+  assert.ok(!body(second).some((l) => l.includes('b.ts')), second.reason);
+});
+
+test('the audit names the new work and gives the whole change as totals', () => {
+  const repo = makeBigBranch(500);
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'x.ts', 'export const x = 1;\n');
+  write(repo, 'y.ts', lines(3));
+  const out = hook(s);
   assert.equal(out.decision, 'block');
-  const body = out.reason.split('\n').slice(1);
-  assert.equal(body[0], 'this turn: code +2 -0  tests +0 -0', out.reason);
-  assert.equal(body[1], 'M a.ts +2 -0', out.reason);
-  assert.ok(body.indexOf('whole change:') > 1, out.reason);
-  assert.equal(out.reason.match(/^M a\.ts /gm).length, 1, 'a file listed in this turn is not listed again');
-  assert.match(out.reason, /\nA b\.ts \+4 -0\n/);
+  const b = body(out);
+  assert.equal(b[1], "this session's change: full  code +4 -0  tests +0 -0", out.reason);
+  for (const line of ['A x.ts +1 -0', 'A y.ts +3 -0', 'new files: x.ts, y.ts', 'exports: x']) {
+    assert.ok(b.includes(line), `${line}\n${out.reason}`);
+  }
+  assert.ok(!out.reason.includes('big/f'), out.reason);
+  assert.match(out.reason, /\nwhole change since merge-base [0-9a-f]{12}: code 502 files \+1004 -0  tests 0 files \+0 -0\n/);
+  assert.ok(out.reason.includes('\nwhole-change audit: step 8, before the pull request\n'), out.reason);
+  assert.ok(b.length <= 40, out.reason);
+  assert.ok(out.reason.includes(ANSWER), out.reason);
+});
+
+test('the owner\'s edits between turns stay out of the sum', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(s), {});
+  write(repo, 'c.ts', lines(9)); // the owner
+  turn(s);
+  write(repo, 'b.ts', lines(6));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(body(out).includes('M a.ts +1 -0') && body(out).includes('M b.ts +1 -0'), out.reason);
+  assert.ok(!out.reason.includes('c.ts'), out.reason);
+});
+
+test('files a merge of the default branch brought in are not the session\'s', () => {
+  const repo = makeBranchRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  git(repo, 'switch', '-q', 'main');
+  write(repo, 'm1.ts', lines(3));
+  write(repo, 'm2.ts', lines(3));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'main 2');
+  git(repo, 'switch', '-q', 'feat');
+  turn(s);
+  git(repo, 'merge', '-q', '--no-edit', 'main');
+  assert.deepEqual(hook(s), {});
+});
+
+test('files a merge of the default branch brought in after start are not the session\'s', () => {
+  const repo = makeBranchRepo();
+  run(repo, ['start']);
+  const s = { cwd: repo, session_id: 's1' };
+  git(repo, 'switch', '-q', 'main');
+  write(repo, 'm1.ts', lines(3));
+  write(repo, 'm2.ts', lines(3));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'main 2');
+  git(repo, 'switch', '-q', 'feat');
+  turn(s);
+  git(repo, 'merge', '-q', '--no-edit', 'main');
+  assert.deepEqual(hook(s), {});
+  turn(s);
+  write(repo, 'own1.ts', lines(2));
+  write(repo, 'own2.ts', lines(2));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  for (const line of ['A own1.ts +2 -0', 'A own2.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  const fileLines = body(out).filter((l) => l.startsWith('A ') || l.startsWith('M '));
+  assert.ok(!fileLines.some((l) => /\bm[12]\.ts\b/.test(l)), out.reason);
+});
+
+test('on the default branch, start still measures what the session committed', () => {
+  const repo = makeHookRepo();
+  run(repo, ['start']);
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'c1.ts', lines(2));
+  write(repo, 'c2.ts', lines(2));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'own');
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  for (const line of ['A c1.ts +2 -0', 'A c2.ts +2 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+});
+
+test('edits made while answering an audit count toward the next one', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  full(repo);
+  assert.equal(hook(s).decision, 'block');
+  write(repo, 'p.ts', lines(2));
+  write(repo, 'q.ts', lines(2));
+  assert.deepEqual(hook({ ...s, stop_hook_active: true }), {});
+  turn(s);
+  assert.deepEqual(hook(s), {}, 'no code change this turn');
+  turn(s);
+  write(repo, 'a.ts', lines(9));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(body(out)[1].startsWith('since the last audit: full'), out.reason);
+  for (const line of ['A p.ts +2 -0', 'A q.ts +2 -0', 'M a.ts +3 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+});
+
+test('a since record whose tree is gone falls back to the turn start', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(s), {});
+  writeFileSync(join(stateOf(repo), `since-${sidHash('s1')}`),
+    `${JSON.stringify({ tree: 'f'.repeat(40), paths: ['a.ts'], spoke: false, absorbed: {} })}\n`);
+  turn(s);
+  write(repo, 'b.ts', lines(6));
+  write(repo, 'c.ts', lines(6));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(body(out).includes('M b.ts +1 -0') && body(out).includes('M c.ts +1 -0'), out.reason);
+  assert.ok(!out.reason.includes('a.ts'), out.reason);
+});
+
+test('the owner\'s later edit of an audited file is not the session\'s', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  write(repo, 'b.ts', lines(6));
+  assert.equal(hook(s).decision, 'block');
+  assert.deepEqual(hook({ ...s, stop_hook_active: true }), {});
+  const rec = JSON.parse(readFileSync(join(stateOf(repo), `since-${sidHash('s1')}`), 'utf8'));
+  assert.deepEqual(rec.paths, [], 'audited files do not come back on a later call of the same turn');
+  write(repo, 'a.ts', lines(9)); // the owner
+  turn(s);
+  write(repo, 'c.ts', lines(6));
+  assert.deepEqual(hook(s), {}, 'only c.ts is the session\'s: small');
+  turn(s);
+  write(repo, 'b.ts', lines(7));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.deepEqual(body(out).slice(2, 4), ['M b.ts +1 -0', 'M c.ts +1 -0'], out.reason);
+  assert.ok(!body(out).some((l) => l.includes('a.ts')), out.reason);
+});
+
+test('in two worktrees, only the one past a small change is named', () => {
+  const { main, wt1, wt2 } = makeTwoWorktrees();
+  const s = { cwd: main, session_id: 'A' };
+  turn(s);
+  write(wt1, 'a.ts', lines(6));
+  write(wt2, 'a.ts', lines(6));
+  write(wt2, 'n.ts', lines(2));
+  edited({ ...s, tool_name: 'Edit', tool_input: { file_path: join(wt1, 'a.ts') } });
+  edited({ ...s, tool_name: 'Edit', tool_input: { file_path: join(wt2, 'a.ts') } });
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(out.reason.includes(`repo: ${wt2}\n`), out.reason);
+  assert.ok(!out.reason.includes(`repo: ${wt1}\n`), out.reason);
+});
+
+test('without a session id the hook measures from the base, then from where it last spoke', () => {
+  const repo = makeBranchRepo();
+  const first = hook({ cwd: repo });
+  assert.equal(first.decision, 'block');
+  assert.equal(body(first)[1], 'change since the base: full  code +4 -0  tests +0 -0', first.reason);
+  assert.deepEqual(hook({ cwd: repo }), {});
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook({ cwd: repo }), {});
+  write(repo, 'c.ts', lines(2));
+  const out = hook({ cwd: repo });
+  assert.equal(out.decision, 'block');
+  assert.equal(body(out)[1], 'since the last audit: full  code +3 -0  tests +0 -0', out.reason);
+  assert.ok(body(out).includes('M a.ts +1 -0') && body(out).includes('A c.ts +2 -0'), out.reason);
+  assert.ok(!out.reason.includes('b.ts'), out.reason);
+});
+
+test('ask_user passes on a small change and is held once past it', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(ask({ ...s, tool_name: 'ask_user' }), {});
+  write(repo, 'b.ts', lines(6));
+  const out = ask({ ...s, tool_name: 'ask_user' });
+  assert.equal(out.permissionDecision, 'deny');
+  const reason = out.permissionDecisionReason;
+  assert.ok(reason.startsWith('strategic-programming audit (see the strategic-programming skill):\nthis session\'s change: '), reason);
+  assert.ok(reason.includes('then call ask_user again'), reason);
+  assert.deepEqual(ask({ ...s, tool_name: 'ask_user' }), {});
+  assert.deepEqual(hook(s), {});
+});
+
+test('a turn that changed nothing writes no since record', () => {
+  const repo = makeBranchRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  assert.deepEqual(hook(s), {});
+  assert.ok(!readdirSync(stateOf(repo)).some((f) => f.startsWith('since')), readdirSync(stateOf(repo)).join());
+});
+
+const auditFiles = (repo) => readdirSync(stateOf(repo)).filter((f) => f.startsWith('audit'));
+
+test('lists are cut at 20 files and 10 names, and the full text is in a file', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  for (let i = 0; i < 60; i++) write(repo, `n/f${String(i).padStart(2, '0')}.ts`, `export const v${i} = ${i};\n`);
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  const b = body(out);
+  assert.equal(b.filter((l) => /^A n\/f\d+\.ts /.test(l)).length, 20, out.reason);
+  assert.ok(b.includes('… and 40 more'), out.reason);
+  assert.match(out.reason, /\nnew files: (n\/f\d+\.ts, ){10}… and 50 more\n/);
+  assert.match(out.reason, /\nexports: (v\d+, ){10}… and 50 more\n/);
+  assert.ok(b.length <= 40, out.reason);
+  const file = /\nfull list: (.+)\n/.exec(out.reason)?.[1];
+  assert.ok(file?.startsWith(stateOf(repo)), out.reason);
+  assert.equal(file, join(stateOf(repo), `audit-${sidHash('s1')}.txt`));
+  assert.equal(readFileSync(file, 'utf8').split('\n').filter((l) => /^A n\/f\d+\.ts /.test(l)).length, 60);
+  assert.match(out.reason, /\nfull list: .+\nwhole change since /, 'the file line comes before the whole change');
+
+  turn(s);
+  full(repo);
+  assert.ok(!hook(s).reason.includes('full list:'));
+  assert.deepEqual(auditFiles(repo), [], 'an audit that fits removes the stale file');
+});
+
+test('an audit that fits names no file', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  full(repo);
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(!out.reason.includes('full list:'), out.reason);
+  assert.deepEqual(auditFiles(repo), []);
+});
+
+test('the --dup hint is given only when start was run', () => {
+  const hint = `For a Full change also run \`node "${SP}" audit --dup\` in that repo.`;
+  const a = makeHookRepo();
+  turn({ cwd: a, session_id: 's1' });
+  full(a);
+  const outA = hook({ cwd: a, session_id: 's1' });
+  assert.equal(outA.decision, 'block');
+  assert.ok(!outA.reason.includes('--dup'), outA.reason);
+
+  const b = makeHookRepo();
+  assert.equal(run(b, ['start']).code, 0);
+  turn({ cwd: b, session_id: 's1' });
+  full(b);
+  const outB = hook({ cwd: b, session_id: 's1' });
+  assert.ok(outB.reason.includes(hint), outB.reason);
+  assert.ok(outB.reason.includes('whole change since start '), outB.reason);
+});
+
+const child = (p) => call('child', p);
+// Records `kid` as a subagent started by `parent`, as SubagentStart does.
+const link = (repo, parent, kid) => child({ cwd: repo, sessionId: parent, agentId: kid, parentAgentId: parent });
+
+test('a parent is not told again what its subagent was audited for', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  assert.deepEqual(link(repo, 'P', 'C'), {});
+  turn(C);
+  for (const n of [1, 2, 3]) write(repo, `n${n}.ts`, lines(2));
+  assert.equal(hook(C).decision, 'block');
+  assert.deepEqual(hook(P), {}, 'the subagent was audited on it');
+  turn(P);
+  write(repo, 'n1.ts', lines(3));
+  write(repo, 'a.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  assert.deepEqual(body(out).slice(2, 4), ['M a.ts +1 -0', 'M n1.ts +1 -0'], out.reason);
+  assert.ok(body(out).includes('new files: none'), out.reason);
+});
+
+test('a subagent\'s small edit counts in the parent\'s sum', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(C), {}, 'one edited file is small');
+  write(repo, 'b.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  for (const line of ['M a.ts +1 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+});
+
+test('a grandchild\'s audit covers the grandparent', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const G = { cwd: repo, sessionId: 'G' };
+  turn(P);
+  link(repo, 'P', 'C');
+  child({ cwd: repo, sessionId: 'C', agentId: 'G', parentAgentId: 'C' });
+  turn(G);
+  full(repo);
+  assert.equal(hook(G).decision, 'block');
+  assert.deepEqual(hook(P), {});
+});
+
+test('a link without parentAgentId uses the payload\'s session', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  assert.deepEqual(child({ cwd: repo, session_id: 'P', agent_id: 'C' }), {});
+  turn(C);
+  full(repo);
+  assert.equal(hook(C).decision, 'block');
+  assert.deepEqual(hook(P), {});
+});
+
+test('odd file names and a file deleted after the audit do not break the record', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'my file.ts', lines(2));
+  write(repo, 'é.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
+  rmSync(join(repo, 'my file.ts'));
+  assert.deepEqual(hook(P), {});
+});
+
+test('child records nothing in a repo without a code map', () => {
+  const repo = makeRepo();
+  assert.deepEqual(child({ cwd: repo, sessionId: 'P', agentId: 'C' }), {});
+  assert.ok(!existsSync(join(repo, '.git', 'strategic-programming')));
+});
+
+test('the plugin wires SubagentStart to the child command', () => {
+  const hooks = JSON.parse(readFileSync(join(dirname(SP), '..', '..', '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
+  assert.ok(hooks.SubagentStart?.[0]?.hooks?.[0]?.command?.endsWith('sp.mjs" child'), JSON.stringify(hooks.SubagentStart));
+});
+
+// P with subagent C1 audited on two new files `n1.ts`, `n2.ts`.
+function parentWithAuditedChild() {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C1 = { cwd: repo, sessionId: 'C1' };
+  turn(P);
+  link(repo, 'P', 'C1');
+  turn(C1);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  assert.equal(hook(C1).decision, 'block');
+  return { repo, P, record: join(stateOf(repo), `reported-${sidHash('C1')}`) };
+}
+
+// A second subagent C2 of P, audited on two more new files `n3.ts`, `n4.ts`.
+function secondChild(repo) {
+  const C2 = { cwd: repo, sessionId: 'C2' };
+  link(repo, 'P', 'C2');
+  turn(C2);
+  write(repo, 'n3.ts', lines(2));
+  write(repo, 'n4.ts', lines(2));
+  assert.equal(hook(C2).decision, 'block');
+}
+
+test('a torn entry in a subagent\'s record costs nothing, and later subagents are still taken over', () => {
+  const { repo, P, record } = parentWithAuditedChild();
+  appendFileSync(record, '100644 abc');
+  assert.deepEqual(hook(P), {});
+  secondChild(repo);
+  assert.deepEqual(hook(P), {});
+});
+
+test('a malformed entry is skipped and the rest of the record is still taken over', () => {
+  const { P, record } = parentWithAuditedChild();
+  appendFileSync(record, 'not an entry\0');
+  assert.deepEqual(hook(P), {});
+});
+
+test('an overlay that fails is not retried', () => {
+  const { repo, P, record } = parentWithAuditedChild();
+  appendFileSync(record, `0 ${'0'.repeat(40)} 100644 ${'1'.repeat(40)}\tghost.ts\0`);
+  // write-tree refuses the missing blob, so the overlay fails and P hears of C1's files once.
+  const first = hook(P);
+  assert.equal(first.decision, 'block');
+  for (const line of ['A n1.ts +2 -0', 'A n2.ts +2 -0']) assert.ok(body(first).includes(line), `${line}\n${first.reason}`);
+  secondChild(repo);
+  const out = hook(P);
+  const text = out.reason ?? '';
+  assert.ok(!text.includes('n3.ts') && !text.includes('n4.ts'), text);
+});
+
+test('files a subagent deleted are taken over as deleted', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  rmSync(join(repo, 'a.ts'));
+  rmSync(join(repo, 'b.ts'));
+  const out = hook(C);
+  assert.equal(out.decision, 'block');
+  for (const line of ['D a.ts +0 -5', 'D b.ts +0 -5']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.deepEqual(hook(P), {});
+});
+
+test('a parent\'s own new file is still audited after its subagent edits it', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  const api = 'export function api() {\n  return 1;\n}\n';
+  turn(P);
+  write(repo, 'x.ts', api);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'x.ts', `${api}// more\n`);
+  write(repo, 'y.ts', lines(2));
+  const kid = hook(C);
+  assert.equal(kid.decision, 'block');
+  for (const line of ['M x.ts +1 -0', 'A y.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  const b = body(out);
+  assert.ok(b.includes('A x.ts +4 -0'), out.reason);
+  const newFiles = b.find((l) => l.startsWith('new files:'));
+  assert.ok(newFiles.includes('x.ts') && !newFiles.includes('y.ts'), out.reason);
+  assert.ok(b.find((l) => l.startsWith('exports:')).includes('api'), out.reason);
+  assert.ok(!b.includes('A y.ts +2 -0'), out.reason);
+});
+
+test('a parent\'s small edit of a file still counts after its subagent is audited on that file', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(P), {});
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'a.ts', lines(7));
+  write(repo, 'n1.ts', lines(2));
+  const kid = hook(C);
+  assert.equal(kid.decision, 'block');
+  for (const line of ['M a.ts +1 -0', 'A n1.ts +2 -0']) assert.ok(body(kid).includes(line), `${line}\n${kid.reason}`);
+  assert.deepEqual(hook(P), {}, 'one edited file is small');
+  turn(P);
+  write(repo, 'b.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  for (const line of ['M a.ts +2 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.ok(!out.reason.includes('n1.ts'), out.reason);
+});
+
+test('two audits of one subagent on the same file are both taken over', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
+  turn(C);
+  write(repo, 'n1.ts', lines(3));
+  write(repo, 'n2.ts', lines(3));
+  write(repo, 'n3.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
+  assert.deepEqual(hook(P), {});
+});
+
+test('a full list that cannot be written does not cost the audit', () => {
+  const repo = makeHookRepo();
+  const s = { cwd: repo, session_id: 's1' };
+  turn(s);
+  for (let i = 0; i < 25; i++) write(repo, `n/f${String(i).padStart(2, '0')}.ts`, `export const v${i} = ${i};\n`);
+  mkdirSync(join(stateOf(repo), `audit-${sidHash('s1')}.txt`));
+  const out = hook(s);
+  assert.equal(out.decision, 'block');
+  assert.ok(body(out).includes('… and 5 more'), out.reason);
+  assert.ok(!body(out).some((l) => l.startsWith('full list:')), out.reason);
 });
