@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -1582,4 +1582,68 @@ test('child records nothing in a repo without a code map', () => {
 test('the plugin wires SubagentStart to the child command', () => {
   const hooks = JSON.parse(readFileSync(join(dirname(SP), '..', '..', '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
   assert.ok(hooks.SubagentStart?.[0]?.hooks?.[0]?.command?.endsWith('sp.mjs" child'), JSON.stringify(hooks.SubagentStart));
+});
+
+// P with subagent C1 audited on two new files `n1.ts`, `n2.ts`.
+function parentWithAuditedChild() {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C1 = { cwd: repo, sessionId: 'C1' };
+  turn(P);
+  link(repo, 'P', 'C1');
+  turn(C1);
+  write(repo, 'n1.ts', lines(2));
+  write(repo, 'n2.ts', lines(2));
+  assert.equal(hook(C1).decision, 'block');
+  return { repo, P, record: join(stateOf(repo), `reported-${sidHash('C1')}`) };
+}
+
+// A second subagent C2 of P, audited on two more new files `n3.ts`, `n4.ts`.
+function secondChild(repo) {
+  const C2 = { cwd: repo, sessionId: 'C2' };
+  link(repo, 'P', 'C2');
+  turn(C2);
+  write(repo, 'n3.ts', lines(2));
+  write(repo, 'n4.ts', lines(2));
+  assert.equal(hook(C2).decision, 'block');
+}
+
+test('a torn entry in a subagent\'s record costs nothing, and later subagents are still taken over', () => {
+  const { repo, P, record } = parentWithAuditedChild();
+  appendFileSync(record, '100644 abc');
+  assert.deepEqual(hook(P), {});
+  secondChild(repo);
+  assert.deepEqual(hook(P), {});
+});
+
+test('a malformed entry is skipped and the rest of the record is still taken over', () => {
+  const { P, record } = parentWithAuditedChild();
+  appendFileSync(record, 'not an entry\0');
+  assert.deepEqual(hook(P), {});
+});
+
+test('an overlay that fails is not retried', () => {
+  const { repo, P, record } = parentWithAuditedChild();
+  appendFileSync(record, `100644 ${'1'.repeat(40)}\tghost.ts\0`);
+  // write-tree refuses the missing blob, so the overlay fails and P hears of C1's files once.
+  assert.equal(hook(P).decision, 'block');
+  secondChild(repo);
+  const out = hook(P);
+  const text = out.reason ?? '';
+  assert.ok(!text.includes('n3.ts') && !text.includes('n4.ts'), text);
+});
+
+test('files a subagent deleted are taken over as deleted', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5), 'c.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  rmSync(join(repo, 'a.ts'));
+  rmSync(join(repo, 'b.ts'));
+  const out = hook(C);
+  assert.equal(out.decision, 'block');
+  for (const line of ['D a.ts +0 -5', 'D b.ts +0 -5']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+  assert.deepEqual(hook(P), {});
 });

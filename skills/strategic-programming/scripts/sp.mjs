@@ -912,10 +912,14 @@ function reportedFile({ state }, hash) {
   return hash ? join(state, `reported-${hash}`) : null;
 }
 
-// The entries in a session's reported file; [] when it has none.
+// The entries in a session's reported file, each one ended by a NUL: the text after the last NUL
+// (an append cut short) is not an entry yet. [] when it has none.
 function reportedEntries(paths, hash) {
-  try { return readFileSync(reportedFile(paths, hash), 'utf8').split('\0').filter(Boolean); } catch { return []; }
+  try { return readFileSync(reportedFile(paths, hash), 'utf8').split('\0').slice(0, -1); } catch { return []; }
 }
+
+// An entry `update-index --index-info` takes: `<octal mode> <sha>\t<path>`.
+const INDEX_ENTRY = /^[0-7]+ (?:[0-9a-f]{40}|[0-9a-f]{64})\t[^\0]+$/;
 
 // Appends what one audit covered: each file as it is in `tree`, and a path the tree no longer
 // holds (deleted, or a rename's old name) as absent. A failure only loses the record, so a
@@ -939,22 +943,26 @@ function recordReported(paths, payload, tree, files) {
 
 // `{ tree, absorbed }`: `since` with what the session's subagents were audited for laid over
 // it, so the parent is not told it again, and the count of each one's entries now taken in.
-// Only entries past `rec.absorbed` are new. Without a session id, without new entries, or when
-// the overlay fails: `since` and the old counts.
+// Only entries past `rec.absorbed` are new; a malformed one is skipped but counted as read.
+// Without a session id or new entries: `since` and the old counts. When the overlay fails:
+// `since` and the new counts, so one bad batch costs one repeat and is not retried forever.
 function absorb(paths, payload, rec, since) {
   const old = rec?.absorbed ?? {};
   const hash = sessionHash(payload);
   if (!hash) return { tree: since, absorbed: old };
   const absorbed = { ...old };
   const fresh = [];
+  let read = false;
   for (const kid of descendants(paths.common, hash)) {
     const entries = reportedEntries(paths, kid);
     const done = Number.isInteger(old[kid]) ? old[kid] : 0;
     if (entries.length <= done) continue;
-    fresh.push(...entries.slice(done));
+    fresh.push(...entries.slice(done).filter((e) => INDEX_ENTRY.test(e)));
     absorbed[kid] = entries.length;
+    read = true;
   }
-  if (!fresh.length) return { tree: since, absorbed: old };
+  if (!read) return { tree: since, absorbed: old };
+  if (!fresh.length) return { tree: since, absorbed };
   pruneSnapshots(paths.state);
   const index = join(paths.state, `snapshot.${process.pid}.index.overlay`);
   try {
@@ -964,7 +972,7 @@ function absorb(paths, payload, rec, since) {
       { cwd: paths.top, env, input: fresh.map((e) => `${e}\0`).join(''), stdio: ['pipe', 'pipe', 'ignore'] });
     return { tree: git(['write-tree'], { cwd: paths.top, env }).trim(), absorbed };
   } catch {
-    return { tree: since, absorbed: old };
+    return { tree: since, absorbed };
   } finally {
     rmSync(index, { force: true });
   }
