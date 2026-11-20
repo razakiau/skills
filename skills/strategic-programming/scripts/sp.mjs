@@ -720,10 +720,15 @@ function hookRepos(payload, { all = false } = {}) {
   return out;
 }
 
+// The first non-empty string among `values`, hashed as a session id; null without one.
+function idHash(values) {
+  const id = values.find((v) => typeof v === 'string' && v);
+  return id ? createHash('sha1').update(id).digest('hex').slice(0, 12) : null;
+}
+
 // The session id (VS Code sends session_id, Copilot CLI sessionId), hashed; null without one.
 function sessionHash(payload) {
-  const id = [payload.session_id, payload.sessionId, payload.SessionId].find((v) => typeof v === 'string' && v);
-  return id ? createHash('sha1').update(id).digest('hex').slice(0, 12) : null;
+  return idHash([payload.session_id, payload.sessionId, payload.SessionId]);
 }
 
 // One turn-start record per session; null without an id: an id-less turn cannot be told
@@ -857,6 +862,114 @@ function edited() {
   });
 }
 
+// The file listing the subagents a session started, one hash per line, in the common git dir.
+const childrenFile = (common, hash) => join(common, 'strategic-programming', `children-${hash}`);
+
+// The hashes listed in a session's children file; [] when it has none.
+function childrenOf(common, hash) {
+  try { return readFileSync(childrenFile(common, hash), 'utf8').split('\n').filter(Boolean); } catch { return []; }
+}
+
+// SubagentStart: records the subagent under the session that started it (its parent agent, or
+// the payload's session), so the parent can take over what the subagent's audits covered.
+// Nothing without both ids, outside a repo, or where no repo opted in. Prints {}.
+function child() {
+  silently(() => {
+    const payload = readPayload();
+    if (!payload) return null;
+    const kid = idHash([payload.agentId, payload.agent_id]);
+    const parent = idHash([payload.parentAgentId, payload.parent_agent_id]) ?? sessionHash(payload);
+    if (!kid || !parent) return null;
+    const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+    const own = repoPaths(cwd, { mkdir: false });
+    if (!own || !worktreeRepos(own).length || childrenOf(own.common, parent).includes(kid)) return null;
+    const file = childrenFile(own.common, parent);
+    mkdirSync(dirname(file), { recursive: true });
+    appendFileSync(file, `${kid}\n`);
+    return null;
+  });
+}
+
+// The hashes of a session's subagents, each followed by its own (depth first); a loop ends it.
+function descendants(common, hash) {
+  const out = [];
+  const seen = new Set([hash]);
+  const walk = (h) => {
+    for (const kid of childrenOf(common, h)) {
+      if (seen.has(kid)) continue;
+      seen.add(kid);
+      out.push(kid);
+      walk(kid);
+    }
+  };
+  walk(hash);
+  return out;
+}
+
+// The file of what a session's audits covered in one repo: NUL-terminated
+// `update-index --index-info` entries, appended per audit; null without a session id.
+function reportedFile({ state }, hash) {
+  return hash ? join(state, `reported-${hash}`) : null;
+}
+
+// The entries in a session's reported file; [] when it has none.
+function reportedEntries(paths, hash) {
+  try { return readFileSync(reportedFile(paths, hash), 'utf8').split('\0').filter(Boolean); } catch { return []; }
+}
+
+// Appends what one audit covered: each file as it is in `tree`, and a path the tree no longer
+// holds (deleted, or a rename's old name) as absent. A failure only loses the record, so a
+// parent hears it again. Nothing without a session id.
+function recordReported(paths, payload, tree, files) {
+  const file = reportedFile(paths, sessionHash(payload));
+  if (!file || !files.length) return;
+  try {
+    const want = new Set(files.flatMap((f) => (f.from === undefined ? [f.path] : [f.path, f.from])));
+    const entries = new Map();
+    for (const e of git(['ls-tree', '-r', '-z', tree], { cwd: paths.top }).split('\0')) {
+      const tab = e.indexOf('\t');
+      if (tab < 0 || !want.has(e.slice(tab + 1))) continue;
+      const [mode, , blob] = e.slice(0, tab).split(' ');
+      entries.set(e.slice(tab + 1), `${mode} ${blob}`);
+    }
+    const zeros = '0'.repeat(tree.length);
+    appendFileSync(file, [...want].map((p) => `${entries.get(p) ?? `0 ${zeros}`}\t${p}\0`).join(''));
+  } catch { /* the parent hears it again */ }
+}
+
+// `{ tree, absorbed }`: `since` with what the session's subagents were audited for laid over
+// it, so the parent is not told it again, and the count of each one's entries now taken in.
+// Only entries past `rec.absorbed` are new. Without a session id, without new entries, or when
+// the overlay fails: `since` and the old counts.
+function absorb(paths, payload, rec, since) {
+  const old = rec?.absorbed ?? {};
+  const hash = sessionHash(payload);
+  if (!hash) return { tree: since, absorbed: old };
+  const absorbed = { ...old };
+  const fresh = [];
+  for (const kid of descendants(paths.common, hash)) {
+    const entries = reportedEntries(paths, kid);
+    const done = Number.isInteger(old[kid]) ? old[kid] : 0;
+    if (entries.length <= done) continue;
+    fresh.push(...entries.slice(done));
+    absorbed[kid] = entries.length;
+  }
+  if (!fresh.length) return { tree: since, absorbed: old };
+  pruneSnapshots(paths.state);
+  const index = join(paths.state, `snapshot.${process.pid}.index.overlay`);
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    git(['read-tree', since], { cwd: paths.top, env });
+    git(['update-index', '-z', '--index-info'],
+      { cwd: paths.top, env, input: fresh.map((e) => `${e}\0`).join(''), stdio: ['pipe', 'pipe', 'ignore'] });
+    return { tree: git(['write-tree'], { cwd: paths.top, env }).trim(), absorbed };
+  } catch {
+    return { tree: since, absorbed: old };
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
 // PostToolUse ask_user: the user's reply starts the next turn. Prints {}.
 function asked() {
   silently(() => {
@@ -910,8 +1023,10 @@ function writeSince(paths, payload, record) {
 // harness never sent the turn start) only the payload's own repo is judged, from the base, then
 // from where the hook last spoke. A path counts only while it is in the whole change since the
 // base (`whole`), so files a merge of the default branch brought in are not the session's.
-// `strict` (the ask_user gate) judges nothing without a turn record; `foldOnly` (Stop while the
-// agent answers an audit) only adds the turn's paths to the record.
+// What the session's subagents were audited for is laid over `since` first (`absorb`), so the
+// parent is not told it again. `strict` (the ask_user gate) judges nothing without a turn record;
+// `foldOnly` (Stop while the agent answers an audit) only adds to the record the turn's paths
+// that differ from `since`.
 function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
   const turned = turnChangedCode(paths, payload);
   if (!turned && (strict || !paths.own || foldOnly)) return null;
@@ -920,14 +1035,13 @@ function unreported(paths, payload, { strict = false, foldOnly = false } = {}) {
   const tree = tracked ? turned.tree : codeSnapshot(paths);
   const rec = readSince(paths, payload);
   const base = findBase(paths);
-  const since = rec?.tree ?? (tracked ? turned.from : base.ref);
+  const { tree: since, absorbed } = absorb(paths, payload, rec, rec?.tree ?? (tracked ? turned.from : base.ref));
   const delta = readDiff(paths.top, since, tree);
   // A turn path joins only while it differs from `since`: a file the audit already covered
   // stays out, so the owner's later edit of it is not the session's.
   const moved = new Set(delta.map((f) => f.path));
   const want = tracked && rec?.paths !== null
     ? [...new Set([...(rec?.paths ?? []), ...turned.files.map((f) => f.path).filter((p) => moved.has(p))])].sort() : null;
-  const absorbed = rec?.absorbed ?? {};
   const next = { tree: since, paths: want, spoke: rec?.spoke ?? false, absorbed };
   // An untracked session gets a record only once the hook speaks to it.
   if ((tracked || rec) && JSON.stringify(next) !== JSON.stringify(rec)) writeSince(paths, payload, next);
@@ -1004,6 +1118,8 @@ function auditTurn(payload, { strict = false, foldOnly = false } = {}) {
     const built = reportOf(paths, { ref: u.since, kind: 'since' }, u.tree, u.files, { cap: true });
     if (built.report.size === 'small') continue;
     writeSince(paths, payload, { tree: u.tree, paths: u.tracked ? [] : null, spoke: true, absorbed: u.absorbed });
+    // A diff too large to judge was not audited, so a parent still hears of it.
+    if (!built.report.tooLarge) recordReported(paths, payload, u.tree, u.files);
     parts.push({ paths, built, u });
   }
   if (!parts.length) return null;
@@ -1085,8 +1201,9 @@ try {
   else if (cmd === 'ask') ask();
   else if (cmd === 'asked') asked();
   else if (cmd === 'edited') edited();
+  else if (cmd === 'child') child();
   else {
-    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn | ask | asked | edited\n');
+    process.stderr.write('usage: node sp.mjs start | audit [--json] [--dup] | hook | turn | ask | asked | edited | child\n');
     process.exitCode = 2;
   }
 } catch (err) {

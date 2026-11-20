@@ -1495,3 +1495,91 @@ test('the --dup hint is given only when start was run', () => {
   assert.ok(outB.reason.includes(hint), outB.reason);
   assert.ok(outB.reason.includes('whole change since start '), outB.reason);
 });
+
+const child = (p) => call('child', p);
+// Records `kid` as a subagent started by `parent`, as SubagentStart does.
+const link = (repo, parent, kid) => child({ cwd: repo, sessionId: parent, agentId: kid, parentAgentId: parent });
+
+test('a parent is not told again what its subagent was audited for', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  assert.deepEqual(link(repo, 'P', 'C'), {});
+  turn(C);
+  for (const n of [1, 2, 3]) write(repo, `n${n}.ts`, lines(2));
+  assert.equal(hook(C).decision, 'block');
+  assert.deepEqual(hook(P), {}, 'the subagent was audited on it');
+  turn(P);
+  write(repo, 'n1.ts', lines(3));
+  write(repo, 'a.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  assert.deepEqual(body(out).slice(2, 4), ['M a.ts +1 -0', 'M n1.ts +1 -0'], out.reason);
+  assert.ok(body(out).includes('new files: none'), out.reason);
+});
+
+test('a subagent\'s small edit counts in the parent\'s sum', () => {
+  const repo = makeHookRepo({ 'a.ts': lines(5), 'b.ts': lines(5) });
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'a.ts', lines(6));
+  assert.deepEqual(hook(C), {}, 'one edited file is small');
+  write(repo, 'b.ts', lines(6));
+  const out = hook(P);
+  assert.equal(out.decision, 'block');
+  for (const line of ['M a.ts +1 -0', 'M b.ts +1 -0']) assert.ok(body(out).includes(line), `${line}\n${out.reason}`);
+});
+
+test('a grandchild\'s audit covers the grandparent', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const G = { cwd: repo, sessionId: 'G' };
+  turn(P);
+  link(repo, 'P', 'C');
+  child({ cwd: repo, sessionId: 'C', agentId: 'G', parentAgentId: 'C' });
+  turn(G);
+  full(repo);
+  assert.equal(hook(G).decision, 'block');
+  assert.deepEqual(hook(P), {});
+});
+
+test('a link without parentAgentId uses the payload\'s session', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  assert.deepEqual(child({ cwd: repo, session_id: 'P', agent_id: 'C' }), {});
+  turn(C);
+  full(repo);
+  assert.equal(hook(C).decision, 'block');
+  assert.deepEqual(hook(P), {});
+});
+
+test('odd file names and a file deleted after the audit do not break the record', () => {
+  const repo = makeHookRepo();
+  const P = { cwd: repo, sessionId: 'P' };
+  const C = { cwd: repo, sessionId: 'C' };
+  turn(P);
+  link(repo, 'P', 'C');
+  turn(C);
+  write(repo, 'my file.ts', lines(2));
+  write(repo, 'é.ts', lines(2));
+  assert.equal(hook(C).decision, 'block');
+  rmSync(join(repo, 'my file.ts'));
+  assert.deepEqual(hook(P), {});
+});
+
+test('child records nothing in a repo without a code map', () => {
+  const repo = makeRepo();
+  assert.deepEqual(child({ cwd: repo, sessionId: 'P', agentId: 'C' }), {});
+  assert.ok(!existsSync(join(repo, '.git', 'strategic-programming')));
+});
+
+test('the plugin wires SubagentStart to the child command', () => {
+  const hooks = JSON.parse(readFileSync(join(dirname(SP), '..', '..', '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
+  assert.ok(hooks.SubagentStart?.[0]?.hooks?.[0]?.command?.endsWith('sp.mjs" child'), JSON.stringify(hooks.SubagentStart));
+});
